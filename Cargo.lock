@@ -1383,6 +1383,7 @@ name = "qcli-core"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
+ "chrono",
  "qcli-config",
  "qcli-driver-api",
  "qcli-driver-demo",

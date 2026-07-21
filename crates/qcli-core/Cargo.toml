@@ -8,6 +8,7 @@ version.workspace = true
 
 [dependencies]
 arrow-array.workspace = true
+chrono.workspace = true
 qcli-config = { path = "../qcli-config" }
 qcli-driver-api = { path = "../qcli-driver-api" }
 tokio.workspace = true

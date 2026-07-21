@@ -34,7 +34,7 @@ Time: 0.059s
 trino-local> \set decimal_places 8
 decimal_places = 8
 trino-local> \status
-target=trino-local engine=trino session=sess_0000000000000001 version=2 status=completed: 1 rows, ...
+target=trino-local engine=trino session=qcli_20260721_1310_01 version=2 status=completed: 1 rows, ...
 ```
 
 ## Architecture
@@ -55,6 +55,8 @@ and compiled successfully under qcli's Rust 1.86 MSRV.
 ## Delivered
 
 - Interactive startup and optional `--target TARGET` selection.
+- Readable session IDs in `username_YYYYMMDD_HHMM_XX` form, using the target
+  user with operating-system username and `qcli` fallbacks.
 - Numbered/name-based target picker for configurations with multiple targets.
 - Primary and continuation prompts containing the active target.
 - Multiline SQL collection terminated by an unquoted final semicolon.
@@ -104,6 +106,20 @@ line editor's prompt handler and asynchronous cancellation.
 The deterministic PTY gate starts `wait-for-cancel;`, waits until qcli reports
 its query ID, sends SIGINT to the qcli process, observes cancellation, verifies
 that the prompt returns, and then exits with Ctrl-D.
+
+## Session ID convention
+
+Interactive sessions use a short, traceable identifier such as:
+
+```text
+deepak_20260721_1605_01
+```
+
+The timestamp uses local time through the current minute. A process-wide
+two-digit counter distinguishes sessions created for the same minute, and
+characters outside ASCII letters, digits, and underscore in the configured
+username are replaced with `_`. This identifier is diagnostic context, not a
+secret or authorization token.
 
 ## Automated evidence
 

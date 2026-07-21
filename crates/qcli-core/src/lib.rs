@@ -1,6 +1,7 @@
 //! Shared versioned sessions and asynchronous query orchestration.
 
 use arrow_array::RecordBatch;
+use chrono::Local;
 use qcli_config::ResolvedTarget;
 use qcli_driver_api::{
     CancellationSignal, DriverError, EngineAdapter, QueryEvent, QueryRequest, QuerySink, QueryState,
@@ -8,7 +9,7 @@ use qcli_driver_api::{
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -58,14 +59,12 @@ impl fmt::Display for CoreError {
 impl std::error::Error for CoreError {}
 
 pub struct SessionManager {
-    next_id: AtomicU64,
     sessions: Mutex<HashMap<String, Session>>,
 }
 
 impl Default for SessionManager {
     fn default() -> Self {
         Self {
-            next_id: AtomicU64::new(1),
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -79,7 +78,14 @@ impl SessionManager {
     /// Panics if another thread poisoned the internal session lock.
     #[must_use]
     pub fn create(&self, target: ResolvedTarget) -> SessionSnapshot {
-        let id = format!("sess_{:016x}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        let username = target
+            .properties
+            .get("user")
+            .map(|value| value.expose().to_owned())
+            .or_else(|| std::env::var("USER").ok())
+            .or_else(|| std::env::var("USERNAME").ok())
+            .unwrap_or_else(|| "qcli".into());
+        let id = next_session_id(&username);
         let session = Session {
             id: id.clone(),
             version: 1,
@@ -141,6 +147,45 @@ impl SessionManager {
         session.overrides.insert(name, value);
         session.version += 1;
         Ok(snapshot(session))
+    }
+}
+
+#[derive(Default)]
+struct SessionIdState {
+    minute: String,
+    counter: u8,
+}
+
+fn next_session_id(username: &str) -> String {
+    static IDS: OnceLock<Mutex<SessionIdState>> = OnceLock::new();
+    let minute = Local::now().format("%Y%m%d_%H%M").to_string();
+    let mut state = IDS
+        .get_or_init(|| Mutex::new(SessionIdState::default()))
+        .lock()
+        .expect("session ID mutex poisoned");
+    if state.minute != minute {
+        state.minute.clone_from(&minute);
+        state.counter = 0;
+    }
+    state.counter = state.counter % 99 + 1;
+    format!("{}_{minute}_{:02}", safe_username(username), state.counter)
+}
+
+fn safe_username(username: &str) -> String {
+    let sanitized = username
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "qcli".into()
+    } else {
+        sanitized
     }
 }
 
@@ -323,6 +368,23 @@ mod tests {
     fn mutations_are_versioned_and_snapshots_are_immutable() {
         let manager = SessionManager::default();
         let first = manager.create(target());
+        let username = std::env::var("USER")
+            .ok()
+            .or_else(|| std::env::var("USERNAME").ok())
+            .unwrap_or_else(|| "qcli".into());
+        let prefix = format!("{}_", safe_username(&username));
+        assert!(first.id.starts_with(&prefix));
+        let timestamp_and_counter = first.id.trim_start_matches(&prefix);
+        assert_eq!(timestamp_and_counter.len(), 16);
+        assert!(
+            timestamp_and_counter
+                .chars()
+                .enumerate()
+                .all(
+                    |(index, character)| matches!(index, 8 | 13) && character == '_'
+                        || !matches!(index, 8 | 13) && character.is_ascii_digit()
+                )
+        );
         let second = manager
             .set_option(&first.id, 1, "decimal_places".into(), "8".into())
             .unwrap();

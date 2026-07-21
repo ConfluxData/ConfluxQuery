@@ -991,7 +991,7 @@ Content-Type: application/json
 Submitting through the session:
 
 ```http
-POST /v1/sessions/sess_01J/queries
+POST /v1/sessions/deepak_20260721_1605_01/queries
 Content-Type: application/json
 ```
 
@@ -1006,7 +1006,7 @@ The response includes both identifiers:
 ```json
 {
   "id": "qcli_01J...",
-  "session_id": "sess_01J...",
+  "session_id": "deepak_20260721_1605_01",
   "session_version": 3,
   "engine_query_id": null,
   "state": "submitted"
@@ -1069,7 +1069,9 @@ The first implementation should prefer correctness and isolation over minimizing
 
 The initial HTTP service may keep sessions in process memory with:
 
-- Cryptographically random session IDs.
+- Readable session IDs in `username_YYYYMMDD_HHMM_XX` form. Session IDs are
+  identifiers, not authentication credentials; caller ownership and
+  authorization must be enforced independently on every operation.
 - Caller ownership on every operation.
 - Configurable idle TTL.
 - Configurable absolute lifetime.
