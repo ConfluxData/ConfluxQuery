@@ -1,0 +1,73 @@
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn config_file(contents: &str) -> PathBuf {
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("qcli-cli-{}-{id}.env", std::process::id()));
+    fs::write(&path, contents).expect("write test configuration");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("secure test configuration");
+    }
+    path
+}
+
+fn qcli(path: &PathBuf, arguments: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_qcli"))
+        .arg("--config")
+        .arg(path)
+        .args(arguments)
+        .env("QCLI_TEST_TOKEN", "integration-secret")
+        .output()
+        .expect("run qcli")
+}
+
+#[test]
+fn milestone_one_commands_resolve_and_redact_targets() {
+    let path = config_file(
+        "[default]\ndecimal_places=3\nstring_truncate=80\n\n[trino-dev]\nengine=trino\nurl=https://user:password@trino.test\ntoken=${QCLI_TEST_TOKEN}\ndecimal_places=10\n\n[databricks-dev]\nengine=databricks\nhost=https://dbc.test\nhttp_path=/sql/1.0/warehouses/abc\ntoken=${QCLI_TEST_TOKEN}\n\n[snowflake-prod]\nengine=snowflake\naccount=acme\npassword=${QCLI_TEST_TOKEN}\n",
+    );
+
+    let check = qcli(&path, &["config", "check"]);
+    assert!(check.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&check.stdout),
+        "Configuration is valid: 3 target(s)\n"
+    );
+
+    let list = qcli(&path, &["target", "list"]);
+    assert!(list.status.success());
+    let list = String::from_utf8_lossy(&list.stdout);
+    assert!(list.contains("trino-dev                trino"));
+    assert!(list.contains("databricks-dev           databricks"));
+    assert!(list.contains("snowflake-prod           snowflake"));
+
+    let show = qcli(&path, &["target", "show", "trino-dev"]);
+    assert!(show.status.success());
+    let show = String::from_utf8_lossy(&show.stdout);
+    assert!(show.contains("decimal_places = 10"));
+    assert!(show.contains("string_truncate = 80"));
+    assert!(show.contains("token = <redacted>"));
+    assert!(show.contains("url = <redacted>"));
+    assert!(!show.contains("integration-secret"));
+    assert!(!show.contains("user:password"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn invalid_value_returns_configuration_exit_code_and_location() {
+    let path = config_file("[trino]\nengine=trino\ndecimal_places=many\n");
+    let output = qcli(&path, &["config", "check"]);
+    assert_eq!(output.status.code(), Some(3));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains(":3:"));
+    assert!(error.contains("non-negative integer"));
+    let _ = fs::remove_file(path);
+}

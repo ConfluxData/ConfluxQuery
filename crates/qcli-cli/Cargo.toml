@@ -1,0 +1,13 @@
+[package]
+name = "qcli"
+description = "One query shell for cloud data platforms"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+qcli-config = { path = "../qcli-config" }
+
+[lints]
+workspace = true

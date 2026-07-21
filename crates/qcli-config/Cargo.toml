@@ -1,0 +1,10 @@
+[package]
+name = "qcli-config"
+description = "Configuration parsing and target resolution for qcli"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
