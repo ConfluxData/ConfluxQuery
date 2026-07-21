@@ -11,6 +11,8 @@ qcli-config = { path = "../qcli-config" }
 qcli-core = { path = "../qcli-core" }
 qcli-driver-api = { path = "../qcli-driver-api" }
 qcli-driver-demo = { path = "../qcli-driver-demo" }
+qcli-driver-databricks = { path = "../qcli-driver-databricks" }
+qcli-driver-snowflake = { path = "../qcli-driver-snowflake" }
 qcli-driver-trino = { path = "../qcli-driver-trino" }
 qcli-output = { path = "../qcli-output" }
 qcli-repl = { path = "../qcli-repl" }

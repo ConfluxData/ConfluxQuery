@@ -1,0 +1,13 @@
+[package]
+name = "qcli-auth"
+description = "Extensible credential providers for qcli"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+
+[lints]
+workspace = true

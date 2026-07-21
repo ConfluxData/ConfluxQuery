@@ -1,7 +1,9 @@
 use qcli_config::{Config, ConfigError, ResolvedTarget, default_config_path};
 use qcli_core::{CoreError, QueryService, SessionManager};
 use qcli_driver_api::{EngineAdapter, QueryEvent};
+use qcli_driver_databricks::DatabricksAdapter;
 use qcli_driver_demo::DemoAdapter;
+use qcli_driver_snowflake::SnowflakeAdapter;
 use qcli_driver_trino::TrinoAdapter;
 use qcli_output::{DisplayOptions, OutputError, OutputFormat, StreamOutput};
 use qcli_repl::ReplError;
@@ -342,7 +344,12 @@ async fn test_target(path: &Path, target_name: &str) -> Result<(), AppError> {
 }
 
 fn adapters() -> Vec<Arc<dyn EngineAdapter>> {
-    vec![Arc::new(DemoAdapter), Arc::new(TrinoAdapter)]
+    vec![
+        Arc::new(DemoAdapter),
+        Arc::new(TrinoAdapter),
+        Arc::new(DatabricksAdapter),
+        Arc::new(SnowflakeAdapter),
+    ]
 }
 
 fn option(

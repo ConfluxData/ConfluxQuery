@@ -72,6 +72,12 @@ Rows are streamed in bounded batches. Memory, disk spill, history, metadata cach
 
 Secrets use redacted types, not ordinary strings passed throughout the program. The design prevents credentials from reaching logs, errors, history, debug output, or HTTP responses.
 
+Authentication is a replaceable provider layer beneath each engine adapter. Query
+execution depends on acquired credentials, not on PAT-, password-, OAuth-, or
+workload-specific fields. The first Databricks and Snowflake providers are PAT and
+username/password respectively; later providers must not change core query or
+frontend contracts. See [ADR-003](adr-003-extensible-authentication.md).
+
 ### 2.8 Prefer internal APIs before external plugin APIs
 
 The first releases use Rust traits and workspace crates as extension points. A stable third-party plugin ABI is deferred until the internal adapter contract has survived multiple real engines.
@@ -335,8 +341,8 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 | M4 — Real Trino execution | Complete | Execute and cancel native queries on Trino |
 | M5 — Interactive terminal | Complete | Use qcli as an interactive Trino shell |
 | M6 — Target switching and navigation | Complete | Switch targets and browse warehouse metadata |
-| M7 — Databricks SQL | Pending | Use the same qcli workflow with Databricks SQL |
-| M8 — Snowflake | Pending | Use the same qcli workflow with Snowflake |
+| M7 — Databricks SQL | Implemented; live gate pending | Use the same qcli workflow with Databricks SQL |
+| M8 — Snowflake | Implemented; live gate pending | Use the same qcli workflow with Snowflake |
 | M9 — Unified release candidate | Pending | Run consistent workflows across all three engines |
 | M10 — Local HTTP query service | Pending | Manage sessions and queries over localhost HTTP |
 | M11 — Production HTTP service | Pending | Secure multi-user HTTP operation with bounded resources |
@@ -508,7 +514,8 @@ qcli
 
 Must demonstrate:
 
-- Required Databricks authentication.
+- PAT authentication through the Databricks credential-provider boundary.
+- Rejection of ambiguous or unsupported authentication configuration before a query is submitted.
 - Statement submission, polling, results, and cancellation.
 - SQL warehouse and catalog/schema context.
 - Databricks query IDs, errors, metrics, and metadata.
@@ -518,6 +525,7 @@ Exit gate:
 
 - Databricks passes the shared adapter conformance profile.
 - Contract refinements are capability-based and not Databricks branches in generic code.
+- The selected client permits credential injection/renewal for future OAuth and workload providers without replacing the query lifecycle.
 
 ### M8 — Snowflake
 
@@ -534,7 +542,8 @@ qcli
 
 Must demonstrate:
 
-- Required Snowflake authentication and TLS.
+- Username/password authentication through the Snowflake credential-provider boundary, with TLS required for credentials.
+- Rejection of ambiguous or unsupported authentication configuration before a connection is opened.
 - Query execution, results, query ID, cancellation, and errors.
 - Warehouse, role, database/catalog, and schema changes.
 - Exact decimal and timestamp handling.
@@ -545,6 +554,7 @@ Exit gate:
 
 - Snowflake passes the shared adapter conformance profile.
 - Concurrent logical sessions cannot leak context through pooled connections.
+- The selected client can add key-pair, OAuth, browser/SSO, programmatic-token, and workload providers without changing core or frontend contracts.
 
 ### M9 — Unified three-engine release candidate
 
@@ -887,8 +897,9 @@ Purpose: prove the adapter contract against a statement-oriented warehouse API.
 
 Tasks:
 
-- Validate driver/API choice, authentication, polling, cancellation, and result formats.
-- Implement Databricks target schema and minimum authentication.
+- Score driver/API candidates on authentication extensibility, query functionality, performance path, maintenance, and dependency cost.
+- Implement the shared credential-provider contract and Databricks PAT provider.
+- Keep token acquisition separate from Statement Execution request construction so OAuth and workload providers can be added independently.
 - Implement statement submission, status polling, result retrieval, and cancellation.
 - Convert results to common Arrow batches.
 - Map catalog/schema and SQL warehouse context.
@@ -909,8 +920,10 @@ Purpose: validate connection-oriented context, roles, and warehouse switching.
 
 Tasks:
 
-- Validate Rust client choice and required authentication methods.
-- Implement target schema, authentication, and TLS behavior.
+- Score Rust client/API candidates on authentication extensibility, query functionality, performance path, maintenance, and dependency cost.
+- Implement the Snowflake username/password provider through the shared credential-provider contract.
+- Prove that connection authentication can later accept key-pair, OAuth, browser/SSO, programmatic-token, profile, and workload providers.
+- Implement target schema and TLS behavior.
 - Implement query submission, query ID, results, cancellation, and errors.
 - Map database to qcli catalog.
 - Implement warehouse, role, database, schema, and session parameter realization.
@@ -1191,7 +1204,9 @@ Complete these short, time-boxed investigations before committing to adapter imp
 
 ### Databricks spike
 
-- Validate required authentication.
+- Validate PAT authentication first.
+- Inventory OAuth M2M, OAuth U2M/browser, Databricks profile, supplied OAuth token, and OIDC/workload identity support.
+- Confirm credentials can be injected and renewed independently of query execution.
 - Submit and poll a statement.
 - Retrieve inline and external/chunked results.
 - Cancel.
@@ -1200,12 +1215,18 @@ Complete these short, time-boxed investigations before committing to adapter imp
 ### Snowflake spike
 
 - Validate the chosen Rust client in target environments.
-- Exercise required authentication.
+- Exercise username/password authentication first.
+- Inventory key-pair JWT, OAuth, external browser/SSO, programmatic access token, Snowflake profile, and workload identity support.
+- Confirm authentication can be extended without replacing query/result handling.
 - Obtain query ID, cancel, and retrieve large results.
 - Switch warehouse, role, database, and schema safely.
 - Confirm decimal and timestamp precision.
 
-Each spike ends with an ADR: selected approach, limitations, dependency impact, and fallback plan.
+Each spike ends with an ADR: selected approach, authentication matrix,
+limitations, dependency impact, required upstream changes, and fallback plan.
+The initial selection is recorded in
+[ADR-004](adr-004-databricks-snowflake-clients.md); live spikes validate or
+supersede it.
 
 ## 14. Initial backlog order
 

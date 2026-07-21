@@ -78,7 +78,9 @@ The name means “query command-line interface.” It avoids implying that qcli 
 - Query charting or terminal graphics.
 - Arbitrary third-party plugins or a stable external plugin ABI.
 - ODBC as the universal fallback.
-- Complete support for every authentication mechanism on day one.
+- Complete implementation of every planned authentication mechanism on day one;
+  the architecture must nevertheless support adding them without changing query,
+  session, frontend, or HTTP contracts.
 - Normalizing every engine-specific query plan into one model.
 - Predicting query cost before execution.
 - Acting as a security boundary. Database permissions remain authoritative.
@@ -172,6 +174,7 @@ decimal_places = 10
 
 [databricks-dev]
 engine = databricks
+auth_type = pat
 host = https://dbc-example.cloud.databricks.com
 http_path = /sql/1.0/warehouses/abc123
 token = ${DATABRICKS_TOKEN}
@@ -180,6 +183,7 @@ schema = default
 
 [snowflake-analytics]
 engine = snowflake
+auth_type = password
 account = organization-account
 user = deepak
 password = ${SNOWFLAKE_PASSWORD}
@@ -410,6 +414,7 @@ Representative properties:
 ```ini
 [databricks-dev]
 engine = databricks
+auth_type = pat
 host = https://dbc-example.cloud.databricks.com
 http_path = /sql/1.0/warehouses/abc123
 token = ${DATABRICKS_TOKEN}
@@ -417,9 +422,16 @@ catalog = main
 schema = default
 ```
 
-Future authentication support may include personal access tokens, OAuth machine-to-machine, OAuth user-to-machine, and cloud-native identity flows.
+The first Databricks provider is PAT. Planned providers include OAuth
+machine-to-machine, OAuth user-to-machine/browser, supplied OAuth tokens,
+existing Databricks CLI/configuration profiles, and OIDC/workload identity.
+Credential acquisition and renewal remain separate from Statement Execution API
+request construction.
 
-The SQL warehouse is normally identified by `http_path`; qcli should derive a friendly compute label when the API makes one available, without requiring an additional configuration lookup to execute a query.
+The SQL warehouse is configured by `http_path`; the adapter derives the
+Statement Execution API `warehouse_id` from it. qcli should derive a friendly
+compute label when the API makes one available, without requiring an additional
+configuration lookup to execute a query.
 
 ### 8.3 Snowflake
 
@@ -428,6 +440,7 @@ Representative properties:
 ```ini
 [snowflake-analytics]
 engine = snowflake
+auth_type = password
 account = organization-account
 user = deepak
 password = ${SNOWFLAKE_PASSWORD}
@@ -437,7 +450,11 @@ schema = PUBLIC
 role = ANALYST
 ```
 
-Future authentication may include password, key-pair, OAuth, external browser/SSO, and workload identity.
+The first Snowflake provider is username/password. Planned providers include
+key-pair JWT, OAuth token and refresh flows, external browser/SSO, programmatic
+access tokens, existing Snowflake CLI profiles, and workload identity federation.
+The connection/query layer must accept credentials from any provider without
+changing the common adapter contract.
 
 Snowflake `database` maps to qcli's catalog concept. qcli commands should use the neutral term `catalog`, while connection diagnostics may show both terms:
 
@@ -779,13 +796,47 @@ Completion failures must not prevent query execution.
 
 ### 16.1 First-release baseline
 
-Select the minimal mechanisms required by intended deployments after validating Rust driver support:
+The initial mechanisms are fixed and intentionally narrow:
 
 - Trino: basic credentials and/or token authentication.
-- Databricks: personal access token, preferably OAuth where driver support is mature.
-- Snowflake: password and key-pair or OAuth, depending on driver maturity.
+- Databricks: personal access token.
+- Snowflake: username and password.
 
-### 16.2 Secret handling invariants
+Authentication breadth remains a release-blocking architecture requirement. See
+[ADR-003](adr-003-extensible-authentication.md).
+
+### 16.2 Authentication provider model
+
+Authentication has separate configuration, acquisition, application, renewal,
+and invalidation stages. An engine adapter receives usable credentials or an
+authenticated connection; core sessions do not know whether those credentials
+came from a password, PAT, browser, profile, private key, or workload identity.
+
+Every provider declares:
+
+- engine and authentication method;
+- required non-secret and secret properties;
+- whether user interaction is required;
+- whether credentials expire and can be renewed;
+- whether batch, interactive terminal, and HTTP-server modes are supported.
+
+Interactive authentication must be explicitly enabled by an interactive command.
+Batch and server operation must never unexpectedly open a browser. Refresh is
+synchronized per provider to avoid concurrent refresh storms.
+
+If `auth_type` is absent, qcli may infer a method only from one unambiguous set of
+properties. Mixed methods, such as a password and token together, fail target
+validation before network activity.
+
+### 16.3 Authentication roadmap
+
+| Engine | Initial | Planned next methods |
+|---|---|---|
+| Databricks | PAT | OAuth M2M, OAuth U2M/browser, existing profile/CLI credentials, supplied OAuth token, OIDC/workload identity |
+| Snowflake | Username/password | Key-pair JWT, OAuth, browser/SSO, programmatic access token, existing profile, workload identity federation |
+| Trino | Basic, bearer | OAuth/OIDC, Kerberos, client certificates |
+
+### 16.4 Secret handling invariants
 
 - Secret values are redacted by type, not by best-effort string replacement alone.
 - Connection URLs are parsed before logging and credentials removed.
@@ -795,8 +846,11 @@ Select the minimal mechanisms required by intended deployments after validating 
 - `config show` always redacts.
 - Authentication failures never echo the submitted credential.
 - Environment variable names may be shown; resolved values may not.
+- Refresh tokens and browser-login caches use OS-native secure storage where available.
+- Private keys are referenced by path by default and private-key material is never serialized in target diagnostics.
+- HTTP session state stores a provider reference and effective identity, never a copy of credentials.
 
-### 16.3 Future secret providers
+### 16.5 Future secret providers
 
 - macOS Keychain.
 - Windows Credential Manager.
@@ -1129,6 +1183,7 @@ qcli-repl             line editing, prompt, history, meta-commands
 qcli-core             sessions, query lifecycle, values, errors
 qcli-config           sectioned .env parsing and resolution
 qcli-driver-api       internal adapter traits and capabilities
+qcli-auth             authentication providers, credential lifecycle, secret resolution
 qcli-driver-trino     Trino adapter
 qcli-driver-databricks Databricks SQL adapter
 qcli-driver-snowflake Snowflake adapter
@@ -1143,7 +1198,7 @@ This is a conceptual decomposition, not a requirement to create many crates imme
 
 Each adapter owns:
 
-- Connection and authentication.
+- Applying acquired credentials to engine requests or connections.
 - Session initialization.
 - Query submission.
 - Status polling or streaming.
@@ -1154,6 +1209,11 @@ Each adapter owns:
 - Metadata queries.
 - Query metrics.
 - Native error conversion.
+
+The authentication layer owns method selection, secret resolution, interactive
+login, credential renewal, and invalidation. It does not submit SQL or interpret
+query results. An adapter may expose engine-specific hooks required to apply a
+credential, but those hooks do not leak into core or frontend APIs.
 
 ### 19.2 Capability reporting
 
@@ -1321,11 +1381,15 @@ Every adapter should pass a conformance suite covering:
 ### Phase 0: specification and driver feasibility
 
 - Finalize `.env` grammar and property names.
-- Prototype authentication and cancellation for all three engines.
+- Prototype initial authentication and cancellation for all three engines.
+- Verify that Databricks PAT and Snowflake password implementations use the same
+  extensible provider lifecycle.
+- Inventory and design-test the planned Databricks and Snowflake authentication
+  methods even when their providers are scheduled later.
 - Validate type coverage and result streaming in candidate Rust libraries.
 - Define the adapter capability contract.
 - Freeze stdout/stderr and exit-code behavior.
-- Decide the minimum authentication modes for release.
+- Confirm the post-baseline authentication priority and compatibility-test matrix.
 
 Exit criterion: no critical driver capability remains an assumption.
 

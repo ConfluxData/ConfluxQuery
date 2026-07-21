@@ -474,8 +474,17 @@ fn allowed_properties(engine: Option<&str>) -> BTreeSet<&'static str> {
             "source",
             "client_tags",
         ],
-        Some("databricks") => &["host", "http_path", "token", "catalog", "schema", "user"],
+        Some("databricks") => &[
+            "auth_type",
+            "host",
+            "http_path",
+            "token",
+            "catalog",
+            "schema",
+            "user",
+        ],
         Some("snowflake") => &[
+            "auth_type",
             "account",
             "user",
             "password",
