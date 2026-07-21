@@ -24,6 +24,18 @@ pub enum QueryEvent {
     State(QueryState),
     EngineQueryId(String),
     RowsProduced(usize),
+    Progress(QueryProgress),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueryProgress {
+    pub state: Option<String>,
+    pub scheduled: Option<bool>,
+    pub completed_splits: Option<u64>,
+    pub total_splits: Option<u64>,
+    pub processed_rows: Option<u64>,
+    pub processed_bytes: Option<u64>,
+    pub elapsed_millis: Option<u64>,
 }
 
 #[derive(Debug, Clone)]

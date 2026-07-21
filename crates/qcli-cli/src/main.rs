@@ -2,6 +2,7 @@ use qcli_config::{Config, ConfigError, ResolvedTarget, default_config_path};
 use qcli_core::{CoreError, QueryService, SessionManager};
 use qcli_driver_api::{EngineAdapter, QueryEvent};
 use qcli_driver_demo::DemoAdapter;
+use qcli_driver_trino::TrinoAdapter;
 use qcli_output::{DisplayOptions, OutputError, OutputFormat, StreamOutput};
 use std::env;
 use std::fmt;
@@ -11,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Debug)]
 enum AppError {
@@ -26,6 +28,14 @@ impl AppError {
         match self {
             Self::Usage(_) | Self::Input(_) => 2,
             Self::Config(_) => 3,
+            Self::Query(CoreError::Driver(error))
+                if matches!(
+                    error.code.as_str(),
+                    "authentication" | "connection" | "insecure_authentication" | "timeout"
+                ) =>
+            {
+                4
+            }
             Self::Query(_) => 5,
             Self::Output(_) => 7,
         }
@@ -123,6 +133,9 @@ async fn run(args: Vec<String>) -> Result<(), AppError> {
             show_target(target);
             Ok(())
         }
+        [group, action, name] if group == "target" && action == "test" => {
+            test_target(&config_path, name).await
+        }
         [] => {
             print_help();
             Ok(())
@@ -190,6 +203,7 @@ fn parse_query_args(arguments: &[String]) -> Result<QueryArguments, AppError> {
 }
 
 async fn run_query(path: &Path, arguments: QueryArguments) -> Result<(), AppError> {
+    let started = Instant::now();
     let sql = match arguments.source {
         QuerySource::Command(sql) => sql,
         QuerySource::File(file) if file == "-" => {
@@ -223,7 +237,7 @@ async fn run_query(path: &Path, arguments: QueryArguments) -> Result<(), AppErro
                 .and_then(|value| value.parse().ok())
         })
         .unwrap_or(OutputFormat::Table);
-    let adapters: Vec<Arc<dyn EngineAdapter>> = vec![Arc::new(DemoAdapter)];
+    let adapters = adapters();
     let service = QueryService::new(adapters, 8);
     let mut handle = service.submit(snapshot, sql)?;
     let query_id = handle.id.clone();
@@ -241,9 +255,12 @@ async fn run_query(path: &Path, arguments: QueryArguments) -> Result<(), AppErro
     }
     let rendered_rows = output.finish()?;
     let mut engine_query_id = None;
+    let mut progress = None;
     while let Some(event) = handle.next_event().await {
-        if let QueryEvent::EngineQueryId(id) = event {
-            engine_query_id = Some(id);
+        match event {
+            QueryEvent::EngineQueryId(id) => engine_query_id = Some(id),
+            QueryEvent::Progress(current) => progress = Some(current),
+            _ => {}
         }
     }
     handle.finish().await?;
@@ -252,7 +269,52 @@ async fn run_query(path: &Path, arguments: QueryArguments) -> Result<(), AppErro
     if let Some(id) = engine_query_id {
         eprintln!("Engine query ID: {id}");
     }
+    if let Some(progress) = progress {
+        if let (Some(completed), Some(total)) = (progress.completed_splits, progress.total_splits) {
+            eprintln!("Splits: {completed}/{total}");
+        }
+        if let (Some(rows), Some(bytes)) = (progress.processed_rows, progress.processed_bytes) {
+            eprintln!("Processed: {rows} rows, {bytes} bytes");
+        }
+    }
+    eprintln!("Time: {:.3}s", started.elapsed().as_secs_f64());
     Ok(())
+}
+
+async fn test_target(path: &Path, target_name: &str) -> Result<(), AppError> {
+    let config = Config::load(path)?;
+    let target = config
+        .target(target_name)
+        .cloned()
+        .ok_or_else(|| ConfigError {
+            path: path.to_path_buf(),
+            line: None,
+            message: format!("target '{target_name}' does not exist"),
+        })?;
+    let engine = target.engine.clone();
+    let snapshot = SessionManager::default().create(target);
+    let service = QueryService::new(adapters(), 8);
+    let mut handle = service.submit(snapshot, "SELECT 1".into())?;
+    let mut rows = 0;
+    while let Some(batch) = handle.next_batch().await {
+        rows += batch.num_rows();
+    }
+    let mut remote_id = None;
+    while let Some(event) = handle.next_event().await {
+        if let QueryEvent::EngineQueryId(id) = event {
+            remote_id = Some(id);
+        }
+    }
+    handle.finish().await?;
+    println!("Target '{target_name}' is reachable ({engine}, {rows} test row(s))");
+    if let Some(id) = remote_id {
+        println!("Engine query ID: {id}");
+    }
+    Ok(())
+}
+
+fn adapters() -> Vec<Arc<dyn EngineAdapter>> {
+    vec![Arc::new(DemoAdapter), Arc::new(TrinoAdapter)]
 }
 
 fn option(
@@ -317,4 +379,5 @@ fn print_help() {
     println!("  config show          Show resolved configuration with secrets redacted");
     println!("  target list          List configured targets");
     println!("  target show NAME     Show one resolved target with secrets redacted");
+    println!("  target test NAME     Test target connectivity with SELECT 1");
 }

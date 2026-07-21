@@ -5,6 +5,7 @@ members = [
     "crates/qcli-core",
     "crates/qcli-driver-api",
     "crates/qcli-driver-demo",
+    "crates/qcli-driver-trino",
     "crates/qcli-output",
 ]
 resolver = "3"
@@ -12,17 +13,21 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.85"
+rust-version = "1.86"
 version = "0.1.0"
 
 [workspace.dependencies]
 arrow-array = "59.1.0"
+arrow-cast = "59.1.0"
 arrow-csv = "59.1.0"
 arrow-json = "59.1.0"
 arrow-schema = "59.1.0"
 async-trait = "0.1.91"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-tokio = { version = "1.53.0", features = ["macros", "rt", "rt-multi-thread", "sync"] }
+tokio = { version = "1.53.0", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+trino-rust-client = "0.11.0"
+url = "2.5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

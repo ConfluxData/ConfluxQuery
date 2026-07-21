@@ -11,6 +11,7 @@ qcli-config = { path = "../qcli-config" }
 qcli-core = { path = "../qcli-core" }
 qcli-driver-api = { path = "../qcli-driver-api" }
 qcli-driver-demo = { path = "../qcli-driver-demo" }
+qcli-driver-trino = { path = "../qcli-driver-trino" }
 qcli-output = { path = "../qcli-output" }
 tokio.workspace = true
 

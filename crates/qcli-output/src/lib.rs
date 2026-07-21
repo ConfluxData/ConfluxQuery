@@ -1,6 +1,7 @@
 //! Streaming result rendering with separate human and machine value policies.
 
 use arrow_array::{Array, Decimal128Array, Int64Array, RecordBatch, StringArray};
+use arrow_cast::display::{ArrayFormatter, FormatOptions};
 use arrow_json::writer::{JsonArray, WriterBuilder as JsonWriterBuilder};
 use arrow_schema::DataType;
 use serde_json::Value;
@@ -324,9 +325,9 @@ fn render_value(
             *scale,
             options.decimal_places,
         )),
-        data_type => Err(OutputError::message(format!(
-            "unsupported human display type {data_type}"
-        ))),
+        _ => ArrayFormatter::try_new(array, &FormatOptions::default())
+            .map(|formatter| formatter.value(row).to_string())
+            .map_err(|error| OutputError::message(error.to_string())),
     }
 }
 
@@ -502,20 +503,20 @@ mod tests {
     }
 
     #[test]
-    fn table_rejects_unsupported_nested_type() {
+    fn table_formats_additional_arrow_types() {
         let batch = RecordBatch::try_from_iter(vec![(
             "items",
             Arc::new(Int32Array::from(vec![1])) as ArrayRef,
         )])
         .unwrap();
-        let error = render_table(
+        let table = render_table(
             &batch,
             DisplayOptions {
                 decimal_places: 3,
                 string_truncate: 80,
             },
         )
-        .unwrap_err();
-        assert!(error.to_string().contains("unsupported human display type"));
+        .unwrap();
+        assert!(table.contains('1'));
     }
 }

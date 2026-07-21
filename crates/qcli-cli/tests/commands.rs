@@ -229,6 +229,28 @@ fn milestone_three_has_stable_usage_and_query_exit_codes() {
 }
 
 #[test]
+fn milestone_four_tests_targets_through_the_generic_adapter_registry() {
+    let path = config_file("[demo]\nengine=demo\n");
+    let output = qcli(&path, &["target", "test", "demo"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Target 'demo' is reachable (demo, 2 test row(s))"));
+    assert!(stdout.contains("Engine query ID: demo-qcli_"));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn milestone_four_reserves_exit_four_for_connection_failures() {
+    let path = config_file(
+        "[trino]\nengine=trino\nurl=http://127.0.0.1:9\nuser=test\nconnect_timeout=100ms\n",
+    );
+    let output = qcli(&path, &["target", "test", "trino"]);
+    assert_eq!(output.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("connection"));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn milestone_two_surfaces_structured_demo_failure() {
     let path = config_file("[demo]\nengine=demo\n");
     let output = qcli(&path, &["--target", "demo", "--command", "fail"]);
