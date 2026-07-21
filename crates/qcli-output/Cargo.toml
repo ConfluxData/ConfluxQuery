@@ -1,0 +1,14 @@
+[package]
+name = "qcli-output"
+description = "Streaming result rendering for qcli"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+
+[lints]
+workspace = true

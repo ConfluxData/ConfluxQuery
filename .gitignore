@@ -1,3 +1,19 @@
 /target/
+**/*.rs.bk
+
+# Local qcli configuration, credentials, and runtime state.
+/.qcli/
+/.env
+/.env.*
+
+# Local diagnostics and coverage output.
+*.log
+*.profraw
+*.profdata
+/coverage/
+
+# Operating-system and editor debris.
+.DS_Store
+.idea/
 *.swp
 *.tmp

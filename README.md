@@ -36,3 +36,14 @@ cargo run -- --config /tmp/qcli-milestone-1.env target show trino-dev
 ```
 
 The normal configuration location is `~/.qcli/.env`. Despite its filename, it is a qcli-owned sectioned format. `[default]` contains shared properties and every other section defines a target.
+
+## Milestone 2 demo
+
+Execute a deterministic query through the shared session, query, adapter, Arrow, and rendering layers:
+
+```text
+cargo run -- --config examples/milestone-2.env \
+  --target demo --command "select * from sample"
+```
+
+The internal demo engine is deterministic test infrastructure. It does not replace any real warehouse adapter.

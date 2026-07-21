@@ -71,3 +71,33 @@ fn invalid_value_returns_configuration_exit_code_and_location() {
     assert!(error.contains("non-negative integer"));
     let _ = fs::remove_file(path);
 }
+
+#[test]
+fn milestone_two_executes_demo_query_through_core() {
+    let path =
+        config_file("[default]\ndecimal_places=3\nstring_truncate=12\n\n[demo]\nengine=demo\n");
+    let output = qcli(
+        &path,
+        &["--target", "demo", "--command", "select * from sample"],
+    );
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("123.457"));
+    assert!(stdout.contains("beta-name-t…"));
+    assert!(stdout.contains("NULL"));
+    assert!(stdout.contains("2 rows"));
+    assert!(stdout.contains("Query ID: qcli_"));
+    assert!(stdout.contains("Engine query ID: demo-qcli_"));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn milestone_two_surfaces_structured_demo_failure() {
+    let path = config_file("[demo]\nengine=demo\n");
+    let output = qcli(&path, &["--target", "demo", "--command", "fail"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("demo_failure"));
+    assert!(stderr.contains("requested deterministic failure"));
+    let _ = fs::remove_file(path);
+}
