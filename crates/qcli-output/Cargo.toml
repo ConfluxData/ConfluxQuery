@@ -8,7 +8,10 @@ version.workspace = true
 
 [dependencies]
 arrow-array.workspace = true
+arrow-csv.workspace = true
+arrow-json.workspace = true
 arrow-schema.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

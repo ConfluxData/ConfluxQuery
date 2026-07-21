@@ -279,9 +279,13 @@ mod tests {
     use super::*;
     use qcli_config::Config;
     use qcli_driver_demo::DemoAdapter;
+    use qcli_output::{DisplayOptions, OutputFormat, StreamOutput};
+
+    static NEXT_TEST_CONFIG: AtomicU64 = AtomicU64::new(1);
 
     fn target() -> ResolvedTarget {
-        let path = std::env::temp_dir().join(format!("qcli-core-{}.env", std::process::id()));
+        let id = NEXT_TEST_CONFIG.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("qcli-core-{}-{id}.env", std::process::id()));
         std::fs::write(&path, "[demo]\nengine=demo\ndecimal_places=3\n").unwrap();
         let target = Config::load(&path).unwrap().target("demo").unwrap().clone();
         std::fs::remove_file(path).ok();
@@ -348,5 +352,46 @@ mod tests {
             error,
             CoreError::Driver(DriverError { code, .. }) if code == "cancelled"
         ));
+    }
+
+    async fn stream_generated_rows(total: usize) {
+        for format in [OutputFormat::Csv, OutputFormat::JsonLines] {
+            let manager = SessionManager::default();
+            let session = manager.create(target());
+            let adapters: Vec<Arc<dyn EngineAdapter>> = vec![Arc::new(DemoAdapter)];
+            let service = QueryService::new(adapters, 8);
+            let mut handle = service
+                .submit(session, format!("generate {total}"))
+                .unwrap();
+            let mut output = StreamOutput::new(
+                std::io::sink(),
+                format,
+                DisplayOptions {
+                    decimal_places: 3,
+                    string_truncate: 80,
+                },
+            )
+            .unwrap();
+            let mut largest_batch = 0;
+            while let Some(batch) = handle.next_batch().await {
+                largest_batch = largest_batch.max(batch.num_rows());
+                output.write_batch(&batch).unwrap();
+            }
+            assert_eq!(output.finish().unwrap(), total);
+            assert_eq!(largest_batch, total.min(1_024));
+            while handle.next_event().await.is_some() {}
+            handle.finish().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn multiple_batches_stream_to_csv_and_jsonl() {
+        stream_generated_rows(10_000).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit Milestone 3 release gate"]
+    async fn million_rows_stream_in_bounded_batches_to_csv_and_jsonl() {
+        stream_generated_rows(1_000_000).await;
     }
 }

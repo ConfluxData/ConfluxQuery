@@ -58,15 +58,90 @@ impl EngineAdapter for DemoAdapter {
             .send(QueryEvent::State(QueryState::ProducingResults))
             .await
             .ok();
-        let batch = sample_batch()?;
-        let rows = batch.num_rows();
-        sink.batches
-            .send(batch)
-            .await
-            .map_err(|_| DriverError::new("consumer_closed", "result consumer closed"))?;
+        let generated_rows = parse_generate(&request.sql)?;
+        let mut rows = 0;
+        if let Some(total) = generated_rows {
+            while rows < total {
+                if sink.cancellation.is_cancelled() {
+                    return Err(DriverError::new("cancelled", "query was cancelled"));
+                }
+                let batch_rows = (total - rows).min(1_024);
+                sink.batches
+                    .send(generated_batch(rows, batch_rows)?)
+                    .await
+                    .map_err(|_| DriverError::new("consumer_closed", "result consumer closed"))?;
+                rows += batch_rows;
+            }
+        } else {
+            let batch = sample_batch()?;
+            rows = batch.num_rows();
+            sink.batches
+                .send(batch)
+                .await
+                .map_err(|_| DriverError::new("consumer_closed", "result consumer closed"))?;
+        }
         sink.events.send(QueryEvent::RowsProduced(rows)).await.ok();
         Ok(())
     }
+}
+
+fn parse_generate(sql: &str) -> Result<Option<usize>, DriverError> {
+    let mut words = sql.split_whitespace();
+    if !words
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("generate"))
+    {
+        return Ok(None);
+    }
+    let value = words.next().ok_or_else(|| {
+        DriverError::new(
+            "invalid_generate",
+            "generate requires a non-negative row count",
+        )
+    })?;
+    if words.next().is_some() {
+        return Err(DriverError::new(
+            "invalid_generate",
+            "generate accepts exactly one row count",
+        ));
+    }
+    value.parse::<usize>().map(Some).map_err(|_| {
+        DriverError::new(
+            "invalid_generate",
+            "generate requires a non-negative row count",
+        )
+    })
+}
+
+fn generated_batch(offset: usize, rows: usize) -> Result<RecordBatch, DriverError> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("amount", DataType::Decimal128(18, 6), false),
+    ]));
+    let ids = (offset..offset + rows)
+        .map(|value| i64::try_from(value).unwrap_or(i64::MAX))
+        .collect::<Vec<_>>();
+    let names = ids
+        .iter()
+        .map(|value| format!("row-{value}"))
+        .collect::<Vec<_>>();
+    let amounts = ids
+        .iter()
+        .map(|value| i128::from(*value) * 1_000_001)
+        .collect::<Vec<_>>();
+    let amount = Decimal128Array::from(amounts)
+        .with_precision_and_scale(18, 6)
+        .map_err(|error| DriverError::new("arrow", error.to_string()))?;
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(ids)),
+            Arc::new(StringArray::from(names)),
+            Arc::new(amount),
+        ],
+    )
+    .map_err(|error| DriverError::new("arrow", error.to_string()))
 }
 
 fn sample_batch() -> Result<RecordBatch, DriverError> {

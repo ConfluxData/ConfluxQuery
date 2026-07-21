@@ -17,8 +17,11 @@ version = "0.1.0"
 
 [workspace.dependencies]
 arrow-array = "59.1.0"
+arrow-csv = "59.1.0"
+arrow-json = "59.1.0"
 arrow-schema = "59.1.0"
 async-trait = "0.1.91"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 tokio = { version = "1.53.0", features = ["macros", "rt", "rt-multi-thread", "sync"] }
 
 [workspace.lints.rust]

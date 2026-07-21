@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -26,6 +27,25 @@ fn qcli(path: &PathBuf, arguments: &[&str]) -> std::process::Output {
         .env("QCLI_TEST_TOKEN", "integration-secret")
         .output()
         .expect("run qcli")
+}
+
+fn qcli_with_stdin(path: &PathBuf, arguments: &[&str], input: &str) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_qcli"))
+        .arg("--config")
+        .arg(path)
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run qcli");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
 }
 
 #[test]
@@ -85,9 +105,126 @@ fn milestone_two_executes_demo_query_through_core() {
     assert!(stdout.contains("123.457"));
     assert!(stdout.contains("beta-name-t…"));
     assert!(stdout.contains("NULL"));
-    assert!(stdout.contains("2 rows"));
-    assert!(stdout.contains("Query ID: qcli_"));
-    assert!(stdout.contains("Engine query ID: demo-qcli_"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("2 rows"));
+    assert!(stderr.contains("Query ID: qcli_"));
+    assert!(stderr.contains("Engine query ID: demo-qcli_"));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn milestone_three_machine_formats_are_exact_and_clean() {
+    let path =
+        config_file("[default]\ndecimal_places=1\nstring_truncate=4\n\n[demo]\nengine=demo\n");
+    let cases = [
+        (
+            "csv",
+            "id,name,amount\n1,alpha,123.456789\n2,beta-name-that-can-be-truncated,NULL\n",
+        ),
+        (
+            "tsv",
+            "id\tname\tamount\n1\talpha\t123.456789\n2\tbeta-name-that-can-be-truncated\tNULL\n",
+        ),
+        (
+            "json",
+            "[{\"id\":1,\"name\":\"alpha\",\"amount\":\"123.456789\"},{\"id\":2,\"name\":\"beta-name-that-can-be-truncated\",\"amount\":null}]\n",
+        ),
+        (
+            "jsonl",
+            "{\"id\":1,\"name\":\"alpha\",\"amount\":\"123.456789\"}\n{\"id\":2,\"name\":\"beta-name-that-can-be-truncated\",\"amount\":null}\n",
+        ),
+    ];
+    for (format, expected) in cases {
+        let output = qcli(
+            &path,
+            &[
+                "--target",
+                "demo",
+                "--command",
+                "select * from sample",
+                "--format",
+                format,
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{format}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            expected,
+            "{format}"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("2 rows"));
+    }
+    let vertical = qcli(
+        &path,
+        &[
+            "--target",
+            "demo",
+            "--command",
+            "select * from sample",
+            "--format",
+            "vertical",
+        ],
+    );
+    let vertical = String::from_utf8(vertical.stdout).unwrap();
+    assert!(vertical.contains("1. row"));
+    assert!(vertical.contains("amount: 123.5"));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn milestone_three_reads_query_file_and_stdin() {
+    let path = config_file("[demo]\nengine=demo\n");
+    let sql_path = std::env::temp_dir().join(format!("qcli-query-{}.sql", std::process::id()));
+    fs::write(&sql_path, "generate 3").unwrap();
+    let from_file = qcli(
+        &path,
+        &[
+            "--target",
+            "demo",
+            "--file",
+            sql_path.to_str().unwrap(),
+            "--format",
+            "csv",
+        ],
+    );
+    assert!(from_file.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&from_file.stdout).lines().count(),
+        4
+    );
+    let from_stdin = qcli_with_stdin(
+        &path,
+        &["--target", "demo", "--file", "-", "--format", "jsonl"],
+        "generate 2\n",
+    );
+    assert!(from_stdin.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&from_stdin.stdout).lines().count(),
+        2
+    );
+    let _ = fs::remove_file(sql_path);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn milestone_three_has_stable_usage_and_query_exit_codes() {
+    let path = config_file("[demo]\nengine=demo\n");
+    assert_eq!(
+        qcli(&path, &["--target", "demo", "--format", "xml"])
+            .status
+            .code(),
+        Some(2)
+    );
+    assert_eq!(
+        qcli(&path, &["--target", "demo", "--command", "fail"])
+            .status
+            .code(),
+        Some(5)
+    );
     let _ = fs::remove_file(path);
 }
 
