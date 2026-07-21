@@ -1428,6 +1428,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "qcli-metadata"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "qcli-driver-api",
+ "tokio",
+]
+
+[[package]]
 name = "qcli-output"
 version = "0.1.0"
 dependencies = [
@@ -1446,6 +1455,7 @@ dependencies = [
  "qcli-config",
  "qcli-core",
  "qcli-driver-api",
+ "qcli-metadata",
  "qcli-output",
  "rustyline",
  "signal-hook",

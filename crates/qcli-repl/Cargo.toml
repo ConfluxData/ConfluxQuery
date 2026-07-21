@@ -10,6 +10,7 @@ version.workspace = true
 qcli-config = { path = "../qcli-config" }
 qcli-core = { path = "../qcli-core" }
 qcli-driver-api = { path = "../qcli-driver-api" }
+qcli-metadata = { path = "../qcli-metadata" }
 qcli-output = { path = "../qcli-output" }
 rustyline.workspace = true
 signal-hook.workspace = true

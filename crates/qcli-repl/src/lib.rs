@@ -2,9 +2,10 @@
 
 use qcli_config::{Config, ResolvedTarget};
 use qcli_core::{CoreError, QueryItem, QueryService, SessionManager, SessionSnapshot};
-use qcli_driver_api::{EngineAdapter, QueryEvent};
+use qcli_driver_api::{EngineAdapter, MetadataRequest, ObjectKind, QueryEvent};
+use qcli_metadata::MetadataService;
 use qcli_output::{DisplayOptions, OutputError, OutputFormat, StreamOutput};
-use rustyline::completion::{Completer, Pair};
+use rustyline::completion::{Completer, Pair, extract_word};
 use rustyline::config::Configurer;
 use rustyline::error::ReadlineError;
 use rustyline::highlight::{CmdKind, Highlighter};
@@ -19,6 +20,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::RwLock;
+use std::time::Duration;
 use std::time::Instant;
 
 #[derive(Debug)]
@@ -66,11 +69,45 @@ impl From<io::Error> for ReplError {
         Self::Io(value)
     }
 }
+impl From<qcli_driver_api::DriverError> for ReplError {
+    fn from(value: qcli_driver_api::DriverError) -> Self {
+        Self::Core(CoreError::Driver(value))
+    }
+}
 
-struct SqlHelper;
+struct SqlHelper {
+    candidates: Arc<RwLock<Vec<String>>>,
+}
 
 impl Completer for SqlHelper {
     type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        position: usize,
+        _context: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let (start, word) = extract_word(line, position, None, |character| {
+            character.is_whitespace() || matches!(character, ',' | '(' | ')')
+        });
+        let candidates = self
+            .candidates
+            .read()
+            .expect("completion candidates lock poisoned")
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .to_ascii_lowercase()
+                    .starts_with(&word.to_ascii_lowercase())
+            })
+            .map(|candidate| Pair {
+                display: candidate.clone(),
+                replacement: candidate.clone(),
+            })
+            .collect();
+        Ok((start, candidates))
+    }
 }
 impl Hinter for SqlHelper {
     type Hint = String;
@@ -134,8 +171,25 @@ pub async fn run(
         .auto_add_history(false)
         .max_history_size(10_000)?
         .build();
+    let completion_candidates = Arc::new(RwLock::new(vec![
+        "\\targets".into(),
+        "\\use".into(),
+        "\\catalogs".into(),
+        "\\schemas".into(),
+        "\\tables".into(),
+        "\\describe".into(),
+        "\\use-catalog".into(),
+        "\\use-schema".into(),
+        "\\status".into(),
+        "\\properties".into(),
+        "SELECT".into(),
+        "FROM".into(),
+        "WHERE".into(),
+    ]));
     let mut editor = Editor::<SqlHelper, DefaultHistory>::with_config(line_config)?;
-    editor.set_helper(Some(SqlHelper));
+    editor.set_helper(Some(SqlHelper {
+        candidates: Arc::clone(&completion_candidates),
+    }));
     let (interrupt_tx, mut interrupts) = tokio::sync::mpsc::channel(8);
     tokio::spawn(async move {
         loop {
@@ -146,6 +200,13 @@ pub async fn run(
     });
     tokio::task::yield_now().await;
     let target = choose_target(config, requested_target, &mut editor)?;
+    extend_completions(
+        &completion_candidates,
+        &config
+            .targets()
+            .map(|target| target.name.clone())
+            .collect::<Vec<_>>(),
+    );
     let history_enabled = target
         .properties
         .get("history")
@@ -160,9 +221,10 @@ pub async fn run(
     if history_enabled {
         let _ = editor.load_history(history_path);
     }
-    let display_properties = target.properties.clone();
+    let mut display_properties = target.properties.clone();
     let sessions = SessionManager::default();
     let mut snapshot = sessions.create(target);
+    let metadata = MetadataService::new(adapters.clone(), Duration::from_secs(30));
     let service = QueryService::new(adapters, 8);
     let mut buffer = String::new();
     let mut format = property_format(&snapshot);
@@ -176,7 +238,7 @@ pub async fn run(
     );
     loop {
         let prompt = if buffer.is_empty() {
-            format!("{}> ", snapshot.target)
+            context_prompt(&snapshot)
         } else {
             "   -> ".to_owned()
         };
@@ -188,15 +250,20 @@ pub async fn run(
                 {
                     if !meta_command(
                         &line,
+                        config,
                         &sessions,
+                        &metadata,
                         &mut snapshot,
                         &mut format,
                         &mut timing,
                         &mut buffer,
                         &mut last_status,
-                        &display_properties,
+                        &mut display_properties,
                         &mut overrides,
-                    )? {
+                        &completion_candidates,
+                    )
+                    .await?
+                    {
                         break;
                     }
                     continue;
@@ -227,7 +294,18 @@ pub async fn run(
                     )
                     .await
                     {
-                        Ok(status) => last_status = status,
+                        Ok(outcome) => {
+                            last_status = outcome.status;
+                            for (name, value) in outcome.session_properties {
+                                snapshot = sessions.set_option(
+                                    &snapshot.id,
+                                    snapshot.version,
+                                    name,
+                                    value,
+                                )?;
+                            }
+                            metadata.invalidate_target(&snapshot.target);
+                        }
                         Err(error) => {
                             eprintln!("error: {error}");
                             last_status = format!("failed: {error}");
@@ -286,28 +364,183 @@ fn choose_target(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn meta_command(
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn meta_command(
     line: &str,
+    config: &Config,
     sessions: &SessionManager,
+    metadata: &MetadataService,
     snapshot: &mut SessionSnapshot,
     format: &mut OutputFormat,
     timing: &mut bool,
     buffer: &mut String,
     status: &mut String,
-    properties: &BTreeMap<String, qcli_config::ConfigValue>,
+    properties: &mut BTreeMap<String, qcli_config::ConfigValue>,
     overrides: &mut BTreeMap<String, String>,
+    completions: &Arc<RwLock<Vec<String>>>,
 ) -> Result<bool, ReplError> {
     let parts = line.split_whitespace().collect::<Vec<_>>();
     match parts.as_slice() {
         ["\\q" | "\\quit"] => return Ok(false),
         ["\\help"] => println!(
-            "\\q quit | \\status | \\set NAME VALUE | \\format FORMAT | \\timing [on|off] | \\properties | \\p print buffer | \\r clear buffer"
+            "\\targets | \\use TARGET | \\catalogs [PATTERN] | \\schemas [PATTERN] | \\tables [PATTERN] | \\describe OBJECT | \\use-catalog CATALOG | \\use-schema SCHEMA | \\status | \\set NAME VALUE | \\format FORMAT | \\timing [on|off] | \\properties | \\q"
         ),
         ["\\status"] => println!(
-            "target={} engine={} session={} version={} status={}",
-            snapshot.target, snapshot.engine, snapshot.id, snapshot.version, status
+            "target={} engine={} catalog={} schema={} session={} version={} status={}",
+            snapshot.target,
+            snapshot.engine,
+            snapshot
+                .properties
+                .get("catalog")
+                .map_or("-", String::as_str),
+            snapshot
+                .properties
+                .get("schema")
+                .map_or("-", String::as_str),
+            snapshot.id,
+            snapshot.version,
+            status
         ),
+        ["\\targets"] => {
+            for target in config.targets() {
+                println!(
+                    "{}{} ({})",
+                    if target.name == snapshot.target {
+                        "* "
+                    } else {
+                        "  "
+                    },
+                    target.name,
+                    target.engine
+                );
+            }
+        }
+        ["\\use", target_name] => {
+            let Some(target) = config.target(target_name).cloned() else {
+                eprintln!(
+                    "target '{target_name}' does not exist; still using '{}'",
+                    snapshot.target
+                );
+                return Ok(true);
+            };
+            let prospective = request_from_target(&target, None);
+            match metadata.catalogs(prospective).await {
+                Ok(_) => {
+                    let old_target = snapshot.target.clone();
+                    *snapshot =
+                        sessions.switch_target(&snapshot.id, snapshot.version, target.clone())?;
+                    *properties = target.properties;
+                    overrides.clear();
+                    metadata.invalidate_target(&old_target);
+                    *format = property_format(snapshot);
+                    *timing = property_bool(snapshot, "timing", true);
+                    println!("Switched to '{}' ({})", snapshot.target, snapshot.engine);
+                }
+                Err(error) => eprintln!(
+                    "target switch failed; still using '{}': {error}",
+                    snapshot.target
+                ),
+            }
+        }
+        ["\\catalogs"] | ["\\catalogs", _] => {
+            let pattern = parts.get(1).copied();
+            let values = metadata
+                .catalogs(metadata_request(snapshot, pattern))
+                .await?;
+            let names = values
+                .into_iter()
+                .map(|value| value.name)
+                .filter(|name| glob_matches(pattern, name))
+                .collect::<Vec<_>>();
+            extend_completions(completions, &names);
+            for name in names {
+                println!("{name}");
+            }
+        }
+        ["\\schemas"] | ["\\schemas", _] => {
+            let pattern = parts.get(1).copied();
+            let values = metadata
+                .schemas(metadata_request(snapshot, pattern))
+                .await?;
+            let names = values
+                .into_iter()
+                .map(|value| value.name)
+                .filter(|name| glob_matches(pattern, name))
+                .collect::<Vec<_>>();
+            extend_completions(completions, &names);
+            for name in names {
+                println!("{name}");
+            }
+        }
+        ["\\tables"] | ["\\tables", _] => {
+            let pattern = parts.get(1).copied();
+            let values = metadata
+                .objects(metadata_request(snapshot, pattern))
+                .await?;
+            let names = values
+                .iter()
+                .map(|value| value.name.clone())
+                .collect::<Vec<_>>();
+            extend_completions(completions, &names);
+            for value in values {
+                let kind = match value.kind {
+                    ObjectKind::Table => "table",
+                    ObjectKind::View => "view",
+                    ObjectKind::Other => "object",
+                };
+                println!("{:<40} {kind}", value.name);
+            }
+        }
+        ["\\describe", object] => {
+            let columns = metadata
+                .describe(metadata_request(snapshot, None), object)
+                .await?;
+            extend_completions(
+                completions,
+                &columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect::<Vec<_>>(),
+            );
+            for column in columns {
+                println!(
+                    "{:<32} {:<28} {}",
+                    column.name,
+                    column.data_type,
+                    column.comment.as_deref().unwrap_or("")
+                );
+            }
+        }
+        ["\\use-catalog", catalog] => {
+            let available = metadata.catalogs(metadata_request(snapshot, None)).await?;
+            if available.iter().any(|value| value.name == *catalog) {
+                *snapshot = sessions.set_option(
+                    &snapshot.id,
+                    snapshot.version,
+                    "catalog".into(),
+                    (*catalog).into(),
+                )?;
+                metadata.invalidate_target(&snapshot.target);
+                println!("catalog = {catalog}");
+            } else {
+                eprintln!("catalog '{catalog}' does not exist; context unchanged");
+            }
+        }
+        ["\\use-schema", schema] => {
+            let available = metadata.schemas(metadata_request(snapshot, None)).await?;
+            if available.iter().any(|value| value.name == *schema) {
+                *snapshot = sessions.set_option(
+                    &snapshot.id,
+                    snapshot.version,
+                    "schema".into(),
+                    (*schema).into(),
+                )?;
+                metadata.invalidate_target(&snapshot.target);
+                println!("schema = {schema}");
+            } else {
+                eprintln!("schema '{schema}' does not exist; context unchanged");
+            }
+        }
         ["\\set", name, value] => {
             *snapshot = sessions.set_option(
                 &snapshot.id,
@@ -348,7 +581,7 @@ fn meta_command(
             }
         }
         ["\\properties"] => {
-            for (name, value) in properties {
+            for (name, value) in properties.iter() {
                 println!(
                     "{name} = {}",
                     if value.is_secret() {
@@ -397,6 +630,76 @@ fn sensitive_property(name: &str, properties: &BTreeMap<String, qcli_config::Con
         }
 }
 
+fn context_prompt(snapshot: &SessionSnapshot) -> String {
+    let catalog = snapshot.properties.get("catalog");
+    let schema = snapshot.properties.get("schema");
+    match (catalog, schema) {
+        (Some(catalog), Some(schema)) => format!("{}[{catalog}.{schema}]> ", snapshot.target),
+        (Some(catalog), None) => format!("{}[{catalog}]> ", snapshot.target),
+        _ => format!("{}> ", snapshot.target),
+    }
+}
+
+fn metadata_request(snapshot: &SessionSnapshot, pattern: Option<&str>) -> MetadataRequest {
+    MetadataRequest {
+        target: snapshot.target.clone(),
+        engine: snapshot.engine.clone(),
+        properties: snapshot.properties.clone(),
+        catalog: snapshot.properties.get("catalog").cloned(),
+        schema: snapshot.properties.get("schema").cloned(),
+        pattern: pattern.map(str::to_owned),
+    }
+}
+
+fn request_from_target(target: &ResolvedTarget, pattern: Option<&str>) -> MetadataRequest {
+    let properties = target
+        .properties
+        .iter()
+        .map(|(name, value)| (name.clone(), value.expose().to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    MetadataRequest {
+        target: target.name.clone(),
+        engine: target.engine.clone(),
+        catalog: properties.get("catalog").cloned(),
+        schema: properties.get("schema").cloned(),
+        properties,
+        pattern: pattern.map(str::to_owned),
+    }
+}
+
+fn glob_matches(pattern: Option<&str>, value: &str) -> bool {
+    let Some(pattern) = pattern else {
+        return true;
+    };
+    let value = value.chars().collect::<Vec<_>>();
+    let mut previous = vec![false; value.len() + 1];
+    previous[0] = true;
+    for token in pattern.chars() {
+        let mut current = vec![false; value.len() + 1];
+        if token == '*' {
+            current[0] = previous[0];
+        }
+        for index in 1..=value.len() {
+            current[index] = if token == '*' {
+                previous[index] || current[index - 1]
+            } else {
+                previous[index - 1] && (token == '?' || token == value[index - 1])
+            };
+        }
+        previous = current;
+    }
+    previous[value.len()]
+}
+
+fn extend_completions(completions: &Arc<RwLock<Vec<String>>>, values: &[String]) {
+    let mut candidates = completions
+        .write()
+        .expect("completion candidates lock poisoned");
+    candidates.extend(values.iter().cloned());
+    candidates.sort_unstable();
+    candidates.dedup();
+}
+
 async fn execute(
     service: &QueryService,
     snapshot: SessionSnapshot,
@@ -404,7 +707,7 @@ async fn execute(
     format: OutputFormat,
     timing: bool,
     interrupts: &mut tokio::sync::mpsc::Receiver<()>,
-) -> Result<String, ReplError> {
+) -> Result<ExecutionOutcome, ReplError> {
     #[cfg(unix)]
     let (interrupt_flag, _signal_registration) = {
         let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -423,12 +726,14 @@ async fn execute(
     eprintln!("Query ID: {query_id}");
     let mut output = StreamOutput::new(io::BufWriter::new(io::stdout().lock()), format, options)?;
     let mut engine_id = None;
+    let mut session_properties = BTreeMap::new();
     let mut cancelled = false;
     loop {
         tokio::select! {
             item = handle.next_item() => match item {
                 Some(QueryItem::Batch(batch)) => output.write_batch(&batch)?,
                 Some(QueryItem::Event(QueryEvent::EngineQueryId(id))) => engine_id = Some(id),
+                Some(QueryItem::Event(QueryEvent::SessionProperties(properties))) => session_properties.extend(properties),
                 Some(QueryItem::Event(_)) => {},
                 None => break,
             },
@@ -455,10 +760,18 @@ async fn execute(
     if timing {
         eprintln!("Time: {elapsed:.3}s");
     }
-    Ok(format!(
-        "completed: {rows} rows, query {query_id}{}",
-        engine_id.map_or_else(String::new, |id| format!(", engine query {id}"))
-    ))
+    Ok(ExecutionOutcome {
+        status: format!(
+            "completed: {rows} rows, query {query_id}{}",
+            engine_id.map_or_else(String::new, |id| format!(", engine query {id}"))
+        ),
+        session_properties,
+    })
+}
+
+struct ExecutionOutcome {
+    status: String,
+    session_properties: BTreeMap<String, String>,
 }
 
 #[cfg(unix)]
@@ -598,5 +911,12 @@ mod tests {
         assert!(sensitive_property("access_token", &properties));
         assert!(sensitive_property("private_key_path", &properties));
         assert!(!sensitive_property("decimal_places", &properties));
+    }
+
+    #[test]
+    fn metadata_globs_support_star_and_question_mark() {
+        assert!(glob_matches(Some("event*"), "event_summary"));
+        assert!(glob_matches(Some("sf?"), "sf1"));
+        assert!(!glob_matches(Some("sf?"), "sf100"));
     }
 }

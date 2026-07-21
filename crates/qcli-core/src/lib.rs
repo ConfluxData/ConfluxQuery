@@ -148,6 +148,35 @@ impl SessionManager {
         session.version += 1;
         Ok(snapshot(session))
     }
+
+    /// Atomically replace a session target when the expected version matches.
+    ///
+    /// # Errors
+    /// Returns an unknown-session or version-conflict error without mutation.
+    ///
+    /// # Panics
+    /// Panics if another thread poisoned the internal session lock.
+    pub fn switch_target(
+        &self,
+        id: &str,
+        expected_version: u64,
+        target: ResolvedTarget,
+    ) -> Result<SessionSnapshot, CoreError> {
+        let mut sessions = self.sessions.lock().expect("session mutex poisoned");
+        let session = sessions
+            .get_mut(id)
+            .ok_or_else(|| CoreError::SessionNotFound(id.into()))?;
+        if session.version != expected_version {
+            return Err(CoreError::VersionConflict {
+                expected: expected_version,
+                actual: session.version,
+            });
+        }
+        session.target = target;
+        session.overrides.clear();
+        session.version += 1;
+        Ok(snapshot(session))
+    }
 }
 
 #[derive(Default)]

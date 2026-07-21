@@ -6,6 +6,7 @@ members = [
     "crates/qcli-driver-api",
     "crates/qcli-driver-demo",
     "crates/qcli-driver-trino",
+    "crates/qcli-metadata",
     "crates/qcli-output",
     "crates/qcli-repl",
 ]

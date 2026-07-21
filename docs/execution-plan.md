@@ -334,7 +334,7 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 | M3 — Batch output and automation | Complete | Stream exact results in all initial machine formats |
 | M4 — Real Trino execution | Complete | Execute and cancel native queries on Trino |
 | M5 — Interactive terminal | Complete | Use qcli as an interactive Trino shell |
-| M6 — Target switching and navigation | Pending | Switch targets and browse warehouse metadata |
+| M6 — Target switching and navigation | Complete | Switch targets and browse warehouse metadata |
 | M7 — Databricks SQL | Pending | Use the same qcli workflow with Databricks SQL |
 | M8 — Snowflake | Pending | Use the same qcli workflow with Snowflake |
 | M9 — Unified release candidate | Pending | Run consistent workflows across all three engines |

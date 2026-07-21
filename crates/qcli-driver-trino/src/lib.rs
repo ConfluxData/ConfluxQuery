@@ -5,8 +5,9 @@ use arrow_json::ReaderBuilder;
 use arrow_schema::{DataType, Field, Fields, Schema};
 use async_trait::async_trait;
 use qcli_driver_api::{
-    AdapterCapabilities, DriverError, EngineAdapter, QueryEvent, QueryProgress, QueryRequest,
-    QuerySink, QueryState,
+    AdapterCapabilities, AdapterCapability, CatalogMetadata, ColumnMetadata, DriverError,
+    EngineAdapter, MetadataRequest, ObjectKind, ObjectMetadata, QueryEvent, QueryProgress,
+    QueryRequest, QuerySink, QueryState, SchemaMetadata,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -29,10 +30,14 @@ impl EngineAdapter for TrinoAdapter {
     }
 
     fn capabilities(&self) -> AdapterCapabilities {
-        AdapterCapabilities {
-            stream_results: true,
-            cancel_query: true,
-        }
+        AdapterCapabilities::from_supported([
+            AdapterCapability::StreamResults,
+            AdapterCapability::CancelQuery,
+            AdapterCapability::ListCatalogs,
+            AdapterCapability::ListSchemas,
+            AdapterCapability::ListObjects,
+            AdapterCapability::DescribeObject,
+        ])
     }
 
     async fn execute(&self, request: QueryRequest, sink: QuerySink) -> Result<(), DriverError> {
@@ -100,6 +105,12 @@ impl EngineAdapter for TrinoAdapter {
             }
             next_uri = page.next_uri;
             if next_uri.is_none() {
+                if let Some(properties) = use_session_update(&request.sql) {
+                    sink.events
+                        .send(QueryEvent::SessionProperties(properties))
+                        .await
+                        .ok();
+                }
                 sink.events
                     .send(QueryEvent::RowsProduced(total_rows))
                     .await
@@ -108,6 +119,216 @@ impl EngineAdapter for TrinoAdapter {
             }
         }
     }
+
+    async fn list_catalogs(
+        &self,
+        request: MetadataRequest,
+    ) -> Result<Vec<CatalogMetadata>, DriverError> {
+        let rows = metadata_rows(&build_client(&request.properties)?, "SHOW CATALOGS").await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row_string(&row, 0).map(|name| CatalogMetadata { name }))
+            .collect())
+    }
+
+    async fn list_schemas(
+        &self,
+        request: MetadataRequest,
+    ) -> Result<Vec<SchemaMetadata>, DriverError> {
+        let sql = request.catalog.as_ref().map_or_else(
+            || "SHOW SCHEMAS".to_owned(),
+            |catalog| format!("SHOW SCHEMAS FROM {}", identifier(catalog)),
+        );
+        let rows = metadata_rows(&build_client(&request.properties)?, &sql).await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                row_string(&row, 0).map(|name| SchemaMetadata {
+                    catalog: request.catalog.clone(),
+                    name,
+                })
+            })
+            .collect())
+    }
+
+    async fn list_objects(
+        &self,
+        request: MetadataRequest,
+    ) -> Result<Vec<ObjectMetadata>, DriverError> {
+        let catalog = request
+            .catalog
+            .as_deref()
+            .or_else(|| request.properties.get("catalog").map(String::as_str))
+            .ok_or_else(|| {
+                DriverError::new("missing_context", "table discovery requires a catalog")
+            })?;
+        let schema = request
+            .schema
+            .as_deref()
+            .or_else(|| request.properties.get("schema").map(String::as_str))
+            .ok_or_else(|| {
+                DriverError::new("missing_context", "table discovery requires a schema")
+            })?;
+        let pattern = request
+            .pattern
+            .as_deref()
+            .map_or_else(|| "%".into(), glob_to_like);
+        let sql = format!(
+            "SELECT table_catalog, table_schema, table_name, table_type FROM {}.information_schema.tables WHERE table_schema = '{}' AND table_name LIKE '{}' ESCAPE '$' ORDER BY table_name",
+            identifier(catalog),
+            literal(schema),
+            literal(&pattern)
+        );
+        let rows = metadata_rows(&build_client(&request.properties)?, &sql).await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(ObjectMetadata {
+                    catalog: row_string(&row, 0),
+                    schema: row_string(&row, 1),
+                    name: row_string(&row, 2)?,
+                    kind: match row_string(&row, 3)?.to_ascii_uppercase().as_str() {
+                        "BASE TABLE" => ObjectKind::Table,
+                        "VIEW" => ObjectKind::View,
+                        _ => ObjectKind::Other,
+                    },
+                })
+            })
+            .collect())
+    }
+
+    async fn describe_object(
+        &self,
+        request: MetadataRequest,
+        object: &str,
+    ) -> Result<Vec<ColumnMetadata>, DriverError> {
+        let qualified = qualify_object(&request, object);
+        let rows = metadata_rows(
+            &build_client(&request.properties)?,
+            &format!("DESCRIBE {qualified}"),
+        )
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(ColumnMetadata {
+                    name: row_string(&row, 0)?,
+                    data_type: row_string(&row, 1)?,
+                    nullable: None,
+                    comment: row_string(&row, 3).filter(|value| !value.is_empty()),
+                })
+            })
+            .collect())
+    }
+}
+
+fn use_session_update(sql: &str) -> Option<BTreeMap<String, String>> {
+    let statement = sql.trim().trim_end_matches(';').trim();
+    let prefix = statement.get(..3)?;
+    let remainder = statement.get(3..)?;
+    if !prefix.eq_ignore_ascii_case("use")
+        || !remainder.chars().next().is_some_and(char::is_whitespace)
+    {
+        return None;
+    }
+    let context = remainder.trim();
+    if context.is_empty() || context.contains(char::is_whitespace) {
+        return None;
+    }
+    let parts = context
+        .split('.')
+        .map(unquote_identifier)
+        .collect::<Vec<_>>();
+    match parts.as_slice() {
+        [schema] => Some(BTreeMap::from([("schema".into(), (*schema).into())])),
+        [catalog, schema] => Some(BTreeMap::from([
+            ("catalog".into(), (*catalog).into()),
+            ("schema".into(), (*schema).into()),
+        ])),
+        _ => None,
+    }
+}
+
+fn unquote_identifier(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(value)
+}
+
+async fn metadata_rows(client: &Client, sql: &str) -> Result<Vec<Vec<Value>>, DriverError> {
+    let mut page = client
+        .get::<Row>(sql)
+        .await
+        .map_err(|error| map_client_error(&error))?;
+    let mut rows = Vec::new();
+    loop {
+        if let Some(error) = page.error {
+            return Err(DriverError::new(
+                error.error_name,
+                format!("{}: {}", error.error_type, error.message),
+            ));
+        }
+        if let Some(data) = page.data {
+            rows.extend(direct_rows(data)?);
+        }
+        let Some(next) = page.next_uri else {
+            return Ok(rows);
+        };
+        page = client
+            .get_next::<Row>(&next)
+            .await
+            .map_err(|error| map_client_error(&error))?;
+    }
+}
+
+fn row_string(row: &[Value], index: usize) -> Option<String> {
+    row.get(index).and_then(|value| match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Null => None,
+        value => Some(value.to_string()),
+    })
+}
+
+fn identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+fn literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
+fn glob_to_like(pattern: &str) -> String {
+    pattern
+        .chars()
+        .map(|character| match character {
+            '*' => "%".into(),
+            '?' => "_".into(),
+            '%' | '_' | '$' => format!("${character}"),
+            _ => character.to_string(),
+        })
+        .collect()
+}
+fn qualify_object(request: &MetadataRequest, object: &str) -> String {
+    if object.contains('.') {
+        return object
+            .split('.')
+            .map(identifier)
+            .collect::<Vec<_>>()
+            .join(".");
+    }
+    let catalog = request
+        .catalog
+        .as_deref()
+        .or_else(|| request.properties.get("catalog").map(String::as_str));
+    let schema = request
+        .schema
+        .as_deref()
+        .or_else(|| request.properties.get("schema").map(String::as_str));
+    [catalog, schema, Some(object)]
+        .into_iter()
+        .flatten()
+        .map(identifier)
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 async fn get_or_cancel(
@@ -916,6 +1137,22 @@ mod tests {
         let error = build_client(&properties).err().unwrap();
         assert_eq!(error.code, "insecure_authentication");
         assert!(!error.to_string().contains("very-secret"));
+    }
+
+    #[test]
+    fn maps_successful_use_statements_to_session_properties() {
+        assert_eq!(
+            use_session_update("USE tpch.sf100"),
+            Some(BTreeMap::from([
+                ("catalog".into(), "tpch".into()),
+                ("schema".into(), "sf100".into()),
+            ]))
+        );
+        assert_eq!(
+            use_session_update("use tiny;"),
+            Some(BTreeMap::from([("schema".into(), "tiny".into())]))
+        );
+        assert_eq!(use_session_update("SELECT 1"), None);
     }
 
     #[tokio::test]

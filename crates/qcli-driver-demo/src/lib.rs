@@ -4,8 +4,9 @@ use arrow_array::{ArrayRef, Decimal128Array, Int64Array, RecordBatch, StringArra
 use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
 use qcli_driver_api::{
-    AdapterCapabilities, DriverError, EngineAdapter, QueryEvent, QueryRequest, QuerySink,
-    QueryState,
+    AdapterCapabilities, AdapterCapability, CatalogMetadata, ColumnMetadata, DriverError,
+    EngineAdapter, MetadataRequest, ObjectKind, ObjectMetadata, QueryEvent, QueryRequest,
+    QuerySink, QueryState, SchemaMetadata,
 };
 use std::sync::Arc;
 
@@ -19,10 +20,14 @@ impl EngineAdapter for DemoAdapter {
     }
 
     fn capabilities(&self) -> AdapterCapabilities {
-        AdapterCapabilities {
-            stream_results: true,
-            cancel_query: true,
-        }
+        AdapterCapabilities::from_supported([
+            AdapterCapability::StreamResults,
+            AdapterCapability::CancelQuery,
+            AdapterCapability::ListCatalogs,
+            AdapterCapability::ListSchemas,
+            AdapterCapability::ListObjects,
+            AdapterCapability::DescribeObject,
+        ])
     }
 
     async fn execute(&self, request: QueryRequest, sink: QuerySink) -> Result<(), DriverError> {
@@ -83,6 +88,87 @@ impl EngineAdapter for DemoAdapter {
         }
         sink.events.send(QueryEvent::RowsProduced(rows)).await.ok();
         Ok(())
+    }
+
+    async fn list_catalogs(
+        &self,
+        _request: MetadataRequest,
+    ) -> Result<Vec<CatalogMetadata>, DriverError> {
+        Ok(vec![CatalogMetadata {
+            name: "demo".into(),
+        }])
+    }
+
+    async fn list_schemas(
+        &self,
+        request: MetadataRequest,
+    ) -> Result<Vec<SchemaMetadata>, DriverError> {
+        Ok(vec![SchemaMetadata {
+            catalog: request.catalog.or(Some("demo".into())),
+            name: "public".into(),
+        }])
+    }
+
+    async fn list_objects(
+        &self,
+        request: MetadataRequest,
+    ) -> Result<Vec<ObjectMetadata>, DriverError> {
+        let objects = [
+            ObjectMetadata {
+                catalog: request.catalog.clone(),
+                schema: request.schema.clone(),
+                name: "events".into(),
+                kind: ObjectKind::Table,
+            },
+            ObjectMetadata {
+                catalog: request.catalog,
+                schema: request.schema,
+                name: "event_summary".into(),
+                kind: ObjectKind::View,
+            },
+        ];
+        Ok(objects
+            .into_iter()
+            .filter(|object| glob_matches(request.pattern.as_deref(), &object.name))
+            .collect())
+    }
+
+    async fn describe_object(
+        &self,
+        _request: MetadataRequest,
+        object: &str,
+    ) -> Result<Vec<ColumnMetadata>, DriverError> {
+        if object != "events" && object != "event_summary" {
+            return Err(DriverError::new(
+                "object_not_found",
+                format!("object '{object}' does not exist"),
+            ));
+        }
+        Ok(vec![
+            ColumnMetadata {
+                name: "event_id".into(),
+                data_type: "bigint".into(),
+                nullable: Some(false),
+                comment: None,
+            },
+            ColumnMetadata {
+                name: "event_name".into(),
+                data_type: "varchar".into(),
+                nullable: Some(true),
+                comment: Some("display name".into()),
+            },
+        ])
+    }
+}
+
+fn glob_matches(pattern: Option<&str>, value: &str) -> bool {
+    let Some(pattern) = pattern else {
+        return true;
+    };
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        value.starts_with(prefix)
+    } else {
+        value == pattern
     }
 }
 

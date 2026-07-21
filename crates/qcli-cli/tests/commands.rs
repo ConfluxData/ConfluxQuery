@@ -321,3 +321,59 @@ fn milestone_five_ctrl_c_cancels_query_without_exiting_shell() {
     terminal.expect(Eof).unwrap();
     let _ = fs::remove_file(path);
 }
+
+#[cfg(unix)]
+#[test]
+fn milestone_six_navigation_and_atomic_target_switch_run_in_a_pseudo_terminal() {
+    use expectrl::{ControlCode, Eof, Expect, Session};
+
+    let path = config_file("[demo]\nengine=demo\n\n[other]\nengine=demo\n");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_qcli"));
+    command
+        .arg("--config")
+        .arg(&path)
+        .arg("--target")
+        .arg("demo");
+    let mut terminal = Session::spawn(command).expect("spawn qcli in a pseudo terminal");
+    terminal.expect("demo> ").unwrap();
+    terminal.send_line("\\targets").unwrap();
+    terminal.expect("* demo (demo)").unwrap();
+    terminal.expect("demo> ").unwrap();
+    terminal.send_line("\\catalogs").unwrap();
+    terminal.expect("demo").unwrap();
+    terminal.expect("demo> ").unwrap();
+    terminal.send_line("\\use-catalog demo").unwrap();
+    terminal.expect("catalog = demo").unwrap();
+    terminal.expect("demo[demo]> ").unwrap();
+    terminal.send_line("\\schemas").unwrap();
+    terminal.expect("public").unwrap();
+    terminal.expect("demo[demo]> ").unwrap();
+    terminal.send_line("\\use-schema public").unwrap();
+    terminal.expect("schema = public").unwrap();
+    terminal.expect("demo[demo.public]> ").unwrap();
+    terminal.send_line("\\tables event*").unwrap();
+    terminal.expect("events").unwrap();
+    terminal.expect("event_summary").unwrap();
+    terminal.expect("demo[demo.public]> ").unwrap();
+    terminal.send("event_su\t").unwrap();
+    terminal.expect("event_summary").unwrap();
+    terminal.send(ControlCode::EndOfText).unwrap();
+    terminal.expect("demo[demo.public]> ").unwrap();
+    terminal.send_line("\\describe events").unwrap();
+    terminal.expect("event_id").unwrap();
+    terminal.expect("event_name").unwrap();
+    terminal.expect("demo[demo.public]> ").unwrap();
+    terminal.send_line("\\use missing").unwrap();
+    terminal.expect("still using 'demo'").unwrap();
+    terminal.expect("demo[demo.public]> ").unwrap();
+    terminal.send_line("\\use other").unwrap();
+    terminal.expect("Switched to 'other'").unwrap();
+    terminal.expect("other> ").unwrap();
+    terminal.send_line("\\status").unwrap();
+    terminal.expect("target=other").unwrap();
+    terminal.expect("version=4").unwrap();
+    terminal.expect("other> ").unwrap();
+    terminal.send_line("\\q").unwrap();
+    terminal.expect(Eof).unwrap();
+    let _ = fs::remove_file(path);
+}

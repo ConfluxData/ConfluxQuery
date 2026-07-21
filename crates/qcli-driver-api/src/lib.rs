@@ -2,7 +2,7 @@
 
 use arrow_array::RecordBatch;
 use async_trait::async_trait;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +25,7 @@ pub enum QueryEvent {
     EngineQueryId(String),
     RowsProduced(usize),
     Progress(QueryProgress),
+    SessionProperties(BTreeMap<String, String>),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -93,10 +94,77 @@ impl fmt::Display for DriverError {
 
 impl std::error::Error for DriverError {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AdapterCapability {
+    StreamResults,
+    CancelQuery,
+    ListCatalogs,
+    ListSchemas,
+    ListObjects,
+    DescribeObject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdapterCapabilities {
-    pub stream_results: bool,
-    pub cancel_query: bool,
+    pub supported: BTreeSet<AdapterCapability>,
+}
+
+impl AdapterCapabilities {
+    #[must_use]
+    pub fn from_supported(capabilities: impl IntoIterator<Item = AdapterCapability>) -> Self {
+        Self {
+            supported: capabilities.into_iter().collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn supports(&self, capability: AdapterCapability) -> bool {
+        self.supported.contains(&capability)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MetadataRequest {
+    pub target: String,
+    pub engine: String,
+    pub properties: BTreeMap<String, String>,
+    pub catalog: Option<String>,
+    pub schema: Option<String>,
+    pub pattern: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogMetadata {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaMetadata {
+    pub catalog: Option<String>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectKind {
+    Table,
+    View,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectMetadata {
+    pub catalog: Option<String>,
+    pub schema: Option<String>,
+    pub name: String,
+    pub kind: ObjectKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnMetadata {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: Option<bool>,
+    pub comment: Option<String>,
 }
 
 #[async_trait]
@@ -104,4 +172,41 @@ pub trait EngineAdapter: Send + Sync {
     fn engine(&self) -> &'static str;
     fn capabilities(&self) -> AdapterCapabilities;
     async fn execute(&self, request: QueryRequest, sink: QuerySink) -> Result<(), DriverError>;
+    async fn list_catalogs(
+        &self,
+        _request: MetadataRequest,
+    ) -> Result<Vec<CatalogMetadata>, DriverError> {
+        Err(DriverError::new(
+            "unsupported_capability",
+            "catalog discovery is not supported",
+        ))
+    }
+    async fn list_schemas(
+        &self,
+        _request: MetadataRequest,
+    ) -> Result<Vec<SchemaMetadata>, DriverError> {
+        Err(DriverError::new(
+            "unsupported_capability",
+            "schema discovery is not supported",
+        ))
+    }
+    async fn list_objects(
+        &self,
+        _request: MetadataRequest,
+    ) -> Result<Vec<ObjectMetadata>, DriverError> {
+        Err(DriverError::new(
+            "unsupported_capability",
+            "object discovery is not supported",
+        ))
+    }
+    async fn describe_object(
+        &self,
+        _request: MetadataRequest,
+        _object: &str,
+    ) -> Result<Vec<ColumnMetadata>, DriverError> {
+        Err(DriverError::new(
+            "unsupported_capability",
+            "object description is not supported",
+        ))
+    }
 }
