@@ -7,6 +7,7 @@ members = [
     "crates/qcli-driver-demo",
     "crates/qcli-driver-trino",
     "crates/qcli-output",
+    "crates/qcli-repl",
 ]
 resolver = "3"
 
@@ -25,7 +26,9 @@ arrow-schema = "59.1.0"
 async-trait = "0.1.91"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-tokio = { version = "1.53.0", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+signal-hook = "0.3.18"
+rustyline = { version = "18.0.1", default-features = false, features = ["custom-bindings", "derive", "with-file-history"] }
+tokio = { version = "1.53.0", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 trino-rust-client = "0.11.0"
 url = "2.5"
 

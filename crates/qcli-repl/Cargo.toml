@@ -1,6 +1,6 @@
 [package]
-name = "qcli"
-description = "One query shell for cloud data platforms"
+name = "qcli-repl"
+description = "Interactive terminal frontend for qcli"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -10,14 +10,10 @@ version.workspace = true
 qcli-config = { path = "../qcli-config" }
 qcli-core = { path = "../qcli-core" }
 qcli-driver-api = { path = "../qcli-driver-api" }
-qcli-driver-demo = { path = "../qcli-driver-demo" }
-qcli-driver-trino = { path = "../qcli-driver-trino" }
 qcli-output = { path = "../qcli-output" }
-qcli-repl = { path = "../qcli-repl" }
+rustyline.workspace = true
+signal-hook.workspace = true
 tokio.workspace = true
 
 [lints]
 workspace = true
-
-[target.'cfg(unix)'.dev-dependencies]
-expectrl = "0.9.0"

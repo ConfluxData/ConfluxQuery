@@ -167,8 +167,15 @@ pub struct QueryHandle {
     pub session_version: u64,
     events: mpsc::Receiver<QueryEvent>,
     batches: mpsc::Receiver<RecordBatch>,
+    events_done: bool,
+    batches_done: bool,
     cancellation: CancellationSignal,
     task: JoinHandle<Result<(), DriverError>>,
+}
+
+pub enum QueryItem {
+    Event(QueryEvent),
+    Batch(RecordBatch),
 }
 
 impl QueryHandle {
@@ -177,6 +184,24 @@ impl QueryHandle {
     }
     pub async fn next_batch(&mut self) -> Option<RecordBatch> {
         self.batches.recv().await
+    }
+    /// Receive whichever query event or result batch becomes available next.
+    pub async fn next_item(&mut self) -> Option<QueryItem> {
+        loop {
+            if self.events_done && self.batches_done {
+                return None;
+            }
+            tokio::select! {
+                event = self.events.recv(), if !self.events_done => match event {
+                    Some(event) => return Some(QueryItem::Event(event)),
+                    None => self.events_done = true,
+                },
+                batch = self.batches.recv(), if !self.batches_done => match batch {
+                    Some(batch) => return Some(QueryItem::Batch(batch)),
+                    None => self.batches_done = true,
+                },
+            }
+        }
     }
     pub fn cancel(&self) {
         self.cancellation.cancel();
@@ -268,6 +293,8 @@ impl QueryService {
             session_version: snapshot.version,
             events: event_rx,
             batches: batch_rx,
+            events_done: false,
+            batches_done: false,
             cancellation,
             task,
         })

@@ -4,6 +4,7 @@ use qcli_driver_api::{EngineAdapter, QueryEvent};
 use qcli_driver_demo::DemoAdapter;
 use qcli_driver_trino::TrinoAdapter;
 use qcli_output::{DisplayOptions, OutputError, OutputFormat, StreamOutput};
+use qcli_repl::ReplError;
 use std::env;
 use std::fmt;
 use std::fs;
@@ -21,6 +22,7 @@ enum AppError {
     Query(CoreError),
     Input(io::Error),
     Output(OutputError),
+    Repl(ReplError),
 }
 
 impl AppError {
@@ -38,6 +40,7 @@ impl AppError {
             }
             Self::Query(_) => 5,
             Self::Output(_) => 7,
+            Self::Repl(_) => 6,
         }
     }
 
@@ -54,6 +57,7 @@ impl fmt::Display for AppError {
             Self::Query(error) => error.fmt(f),
             Self::Input(error) => write!(f, "could not read SQL input: {error}"),
             Self::Output(error) => write!(f, "could not write query results: {error}"),
+            Self::Repl(error) => write!(f, "interactive terminal failed: {error}"),
         }
     }
 }
@@ -76,6 +80,12 @@ impl From<OutputError> for AppError {
     }
 }
 
+impl From<ReplError> for AppError {
+    fn from(value: ReplError) -> Self {
+        Self::Repl(value)
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     match run(env::args().skip(1).collect()).await {
@@ -90,16 +100,38 @@ async fn main() -> ExitCode {
 
 async fn run(args: Vec<String>) -> Result<(), AppError> {
     let (config_path, command) = parse_global_args(args)?;
-    if command.iter().any(|argument| {
-        matches!(
-            argument.as_str(),
-            "--target" | "--command" | "--file" | "--format"
-        )
-    }) {
+    if command
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "--command" | "--file" | "--format"))
+    {
         let query = parse_query_args(&command)?;
         return run_query(&config_path, query).await;
     }
+    if command.is_empty()
+        || command
+            .first()
+            .is_some_and(|argument| argument == "--target")
+    {
+        let target = match command.as_slice() {
+            [] => None,
+            [flag, target] if flag == "--target" => Some(target.as_str()),
+            _ => {
+                return Err(AppError::Usage(
+                    "interactive usage: qcli [--target TARGET]".into(),
+                ));
+            }
+        };
+        let config = Config::load(&config_path)?;
+        let history = qcli_repl::history_path(&config_path);
+        return qcli_repl::run(&config, target, adapters(), &history)
+            .await
+            .map_err(Into::into);
+    }
     match command.as_slice() {
+        [help] if help == "--help" || help == "-h" => {
+            print_help();
+            Ok(())
+        }
         [group, action] if group == "config" && action == "path" => {
             println!("{}", config_path.display());
             Ok(())
@@ -136,12 +168,8 @@ async fn run(args: Vec<String>) -> Result<(), AppError> {
         [group, action, name] if group == "target" && action == "test" => {
             test_target(&config_path, name).await
         }
-        [] => {
-            print_help();
-            Ok(())
-        }
         _ => Err(AppError::Usage(
-            "unknown command; run qcli without arguments for help".into(),
+            "unknown command; run qcli --help for help".into(),
         )),
     }
 }
@@ -368,7 +396,8 @@ fn show_target(target: &ResolvedTarget) {
 
 fn print_help() {
     println!("qcli — one query shell for cloud data platforms\n");
-    println!("Usage: qcli [--config PATH] <command>");
+    println!("Usage: qcli [--config PATH] [--target TARGET]");
+    println!("       qcli [--config PATH] <command>");
     println!(
         "       qcli [--config PATH] --target TARGET (--command SQL | --file PATH) [--format FORMAT]\n"
     );

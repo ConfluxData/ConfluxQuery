@@ -260,3 +260,64 @@ fn milestone_two_surfaces_structured_demo_failure() {
     assert!(stderr.contains("requested deterministic failure"));
     let _ = fs::remove_file(path);
 }
+
+#[cfg(unix)]
+#[test]
+fn milestone_five_interactive_flow_runs_in_a_pseudo_terminal() {
+    use expectrl::{Eof, Expect, Session};
+
+    let path = config_file(
+        "[default]\ndecimal_places=3\nstring_truncate=12\ntiming=true\n\n[other]\nengine=demo\n\n[demo]\nengine=demo\n",
+    );
+    let mut command = Command::new(env!("CARGO_BIN_EXE_qcli"));
+    command.arg("--config").arg(&path);
+    let mut terminal = Session::spawn(command).expect("spawn qcli in a pseudo terminal");
+    terminal.expect("Select a target:").unwrap();
+    terminal.expect("target> ").unwrap();
+    terminal.send_line("demo").unwrap();
+    terminal.expect("demo> ").unwrap();
+    terminal.send_line("select *").unwrap();
+    terminal.expect("-> ").unwrap();
+    terminal.send_line("from sample;").unwrap();
+    terminal.expect("2 rows").unwrap();
+    terminal.expect("demo> ").unwrap();
+    terminal.send_line("\\set decimal_places 8").unwrap();
+    terminal.expect("decimal_places = 8").unwrap();
+    terminal.expect("demo> ").unwrap();
+    terminal.send_line("\\status").unwrap();
+    terminal.expect("version=2").unwrap();
+    terminal.expect("completed: 2 rows").unwrap();
+    terminal.expect("demo> ").unwrap();
+    terminal.send_line("\\properties").unwrap();
+    terminal.expect("decimal_places = 8").unwrap();
+    terminal.expect("demo> ").unwrap();
+    terminal.send_line("\\q").unwrap();
+    terminal.expect(Eof).unwrap();
+    let _ = fs::remove_file(path);
+}
+
+#[cfg(unix)]
+#[test]
+fn milestone_five_ctrl_c_cancels_query_without_exiting_shell() {
+    use expectrl::process::unix::Signal;
+    use expectrl::{ControlCode, Eof, Expect, Session};
+
+    let path = config_file("[demo]\nengine=demo\n");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_qcli"));
+    command
+        .arg("--config")
+        .arg(&path)
+        .arg("--target")
+        .arg("demo");
+    let mut terminal = Session::spawn(command).expect("spawn qcli in a pseudo terminal");
+    terminal.expect("demo> ").unwrap();
+    terminal.send_line("wait-for-cancel;").unwrap();
+    terminal.expect("Query ID: qcli_").unwrap();
+    terminal.get_process_mut().signal(Signal::SIGINT).unwrap();
+    terminal.expect("Cancelling query").unwrap();
+    terminal.expect("query was cancelled").unwrap();
+    terminal.expect("demo> ").unwrap();
+    terminal.send(ControlCode::EndOfTransmission).unwrap();
+    terminal.expect(Eof).unwrap();
+    let _ = fs::remove_file(path);
+}

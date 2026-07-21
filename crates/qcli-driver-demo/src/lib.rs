@@ -37,18 +37,19 @@ impl EngineAdapter for DemoAdapter {
             )))
             .await
             .ok();
-        if request.sql.trim().eq_ignore_ascii_case("fail") {
+        let statement = request.sql.trim().trim_end_matches(';').trim_end();
+        if statement.eq_ignore_ascii_case("fail") {
             return Err(DriverError::new(
                 "demo_failure",
                 "requested deterministic failure",
             ));
         }
-        if request.sql.trim().eq_ignore_ascii_case("wait-for-cancel") {
+        if statement.eq_ignore_ascii_case("wait-for-cancel") {
             for _ in 0..1_000 {
                 if sink.cancellation.is_cancelled() {
                     return Err(DriverError::new("cancelled", "query was cancelled"));
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         }
         if sink.cancellation.is_cancelled() {
@@ -58,7 +59,7 @@ impl EngineAdapter for DemoAdapter {
             .send(QueryEvent::State(QueryState::ProducingResults))
             .await
             .ok();
-        let generated_rows = parse_generate(&request.sql)?;
+        let generated_rows = parse_generate(statement)?;
         let mut rows = 0;
         if let Some(total) = generated_rows {
             while rows < total {
