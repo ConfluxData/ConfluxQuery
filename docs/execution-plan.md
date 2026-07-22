@@ -342,8 +342,8 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 | M5 — Interactive terminal | Complete | Use qcli as an interactive Trino shell |
 | M6 — Target switching and navigation | Complete | Switch targets and browse warehouse metadata |
 | M7 — Databricks SQL | Implemented; live gate pending | Use the same qcli workflow with Databricks SQL |
-| M8 — Snowflake | Implemented; live gate pending | Use the same qcli workflow with Snowflake |
-| M9 — Unified release candidate | Pending | Run consistent workflows across all three engines |
+| M8 — Snowflake | Accepted; live validation deferred to M9 | Use the same qcli workflow with Snowflake |
+| M9 — Unified release candidate | Next | Run consistent workflows across all three engines |
 | M10 — Local HTTP query service | Pending | Manage sessions and queries over localhost HTTP |
 | M11 — Production HTTP service | Pending | Secure multi-user HTTP operation with bounded resources |
 | M12 — Packaged release | Pending | Install and run signed cross-platform artifacts |
@@ -556,6 +556,10 @@ Exit gate:
 - Concurrent logical sessions cannot leak context through pooled connections.
 - The selected client can add key-pair, OAuth, browser/SSO, programmatic-token, and workload providers without changing core or frontend contracts.
 
+Implementation was accepted for Phase 1 without a Snowflake test account. The
+unverified live portions of this exit gate are explicitly inherited by M9; they
+are not treated as proven behavior.
+
 ### M9 — Unified three-engine release candidate
 
 Demo:
@@ -573,6 +577,14 @@ Must demonstrate:
 - Cross-engine type and metadata behavior.
 - Stable version-one configuration and CLI compatibility policy.
 - Large-result reliability and bounded memory.
+- The deferred Snowflake M8 live matrix: password login, session renewal,
+  multi-chunk results, exact decimals/timestamps, metadata, context isolation,
+  and failure behavior.
+- An explicit decision for Snowflake query IDs and server-side cancellation:
+  upstream client enhancement, adapter extension, transport pivot, or a declared
+  unsupported capability for the release candidate.
+- The deferred Databricks live edge cases, including qualified catalog/schema
+  switching and large-result chunk behavior.
 
 Exit gate:
 

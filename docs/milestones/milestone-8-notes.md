@@ -1,6 +1,6 @@
 # Milestone 8 Notes: Snowflake
 
-Status: Implementation complete; live Snowflake gate pending
+Status: Accepted for Phase 1; live validation explicitly deferred to Milestone 9
 
 Implemented: 2026-07-21
 
@@ -36,7 +36,21 @@ snowflake-dev[REPORTING.PUBLIC]> USE WAREHOUSE REPORTING_WH;
 ```
 
 The environment used for implementation did not contain Snowflake account
-credentials, so these live commands remain the milestone's final external gate.
+credentials. We accepted the adapter foundation without claiming that these
+commands were demonstrated against Snowflake. Every live gate below is inherited
+by Milestone 9.
+
+## Acceptance decision
+
+Milestone 8 was intentionally compressed to keep Phase 1 moving. Acceptance
+means the adapter boundary, password configuration, selected client integration,
+bounded conversion path, metadata implementation, tests, and documentation are
+present. It does not mean production compatibility has been established.
+
+The release candidate cannot graduate while the required Snowflake live matrix
+remains untested. If `snowflakedb-rs` fails that matrix, M9 may extend it, replace
+it, or move the adapter to a qcli-owned protocol implementation without changing
+the frontend or core contracts.
 
 ## Implemented
 
@@ -79,10 +93,9 @@ Focused tests cover credential redaction, identifier quoting, metadata pattern
 matching, and session-context parsing. The selected crate and all required
 features compile on qcli's Rust 1.86 baseline.
 
-## Live exit gate
+## Deferred live gate inherited by Milestone 9
 
-Before changing the status to `Complete`, run against a test Snowflake account and
-record:
+Before completing Milestone 9, run against a test Snowflake account and record:
 
 - password-authenticated `SELECT 1`.
 - a multi-chunk result and bounded process memory.
