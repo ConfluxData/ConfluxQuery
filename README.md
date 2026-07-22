@@ -9,6 +9,12 @@ Architecture and delivery documentation:
 - [Extensible authentication providers](docs/adr-003-extensible-authentication.md)
 - [Databricks and Snowflake Rust client selection](docs/adr-004-databricks-snowflake-clients.md)
 
+Inspect an engine's normalized capabilities without connecting:
+
+```text
+qcli target capabilities TARGET
+```
+
 The project is under sequenced implementation. See the [product design](docs/product-design.md) and [execution plan](docs/execution-plan.md).
 
 ## Current milestone

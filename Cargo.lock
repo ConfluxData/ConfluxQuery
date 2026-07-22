@@ -1562,6 +1562,7 @@ dependencies = [
  "qcli-config",
  "qcli-core",
  "qcli-driver-api",
+ "qcli-driver-conformance",
  "qcli-driver-databricks",
  "qcli-driver-demo",
  "qcli-driver-snowflake",
@@ -1601,6 +1602,15 @@ version = "0.1.0"
 dependencies = [
  "arrow-array",
  "async-trait",
+ "tokio",
+]
+
+[[package]]
+name = "qcli-driver-conformance"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "qcli-driver-api",
  "tokio",
 ]
 

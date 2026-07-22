@@ -104,6 +104,29 @@ pub enum AdapterCapability {
     DescribeObject,
 }
 
+impl AdapterCapability {
+    pub const ALL: [Self; 6] = [
+        Self::StreamResults,
+        Self::CancelQuery,
+        Self::ListCatalogs,
+        Self::ListSchemas,
+        Self::ListObjects,
+        Self::DescribeObject,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StreamResults => "stream_results",
+            Self::CancelQuery => "cancel_query",
+            Self::ListCatalogs => "list_catalogs",
+            Self::ListSchemas => "list_schemas",
+            Self::ListObjects => "list_objects",
+            Self::DescribeObject => "describe_object",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdapterCapabilities {
     pub supported: BTreeSet<AdapterCapability>,

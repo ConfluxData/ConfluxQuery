@@ -322,6 +322,21 @@ fn milestone_five_ctrl_c_cancels_query_without_exiting_shell() {
     let _ = fs::remove_file(path);
 }
 
+#[test]
+fn milestone_nine_reports_capabilities_without_connecting() {
+    let path = config_file(
+        "[snowflake-dev]\nengine=snowflake\nauth_type=password\naccount=acme\nuser=alice\npassword=${QCLI_TEST_TOKEN}\n",
+    );
+    let output = qcli(&path, &["target", "capabilities", "snowflake-dev"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("engine = snowflake"));
+    assert!(stdout.contains("stream_results = yes"));
+    assert!(stdout.contains("cancel_query = no"));
+    assert!(!stdout.contains("integration-secret"));
+    let _ = fs::remove_file(path);
+}
+
 #[cfg(unix)]
 #[test]
 fn milestone_six_navigation_and_atomic_target_switch_run_in_a_pseudo_terminal() {

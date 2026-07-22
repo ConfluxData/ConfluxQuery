@@ -1,0 +1,15 @@
+[package]
+name = "qcli-driver-conformance"
+description = "Reusable adapter conformance harness for qcli"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+arrow-array.workspace = true
+qcli-driver-api = { path = "../qcli-driver-api" }
+tokio.workspace = true
+
+[lints]
+workspace = true

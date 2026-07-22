@@ -1,6 +1,6 @@
 use qcli_config::{Config, ConfigError, ResolvedTarget, default_config_path};
 use qcli_core::{CoreError, QueryService, SessionManager};
-use qcli_driver_api::{EngineAdapter, QueryEvent};
+use qcli_driver_api::{AdapterCapability, EngineAdapter, QueryEvent};
 use qcli_driver_databricks::DatabricksAdapter;
 use qcli_driver_demo::DemoAdapter;
 use qcli_driver_snowflake::SnowflakeAdapter;
@@ -169,6 +169,9 @@ async fn run(args: Vec<String>) -> Result<(), AppError> {
         }
         [group, action, name] if group == "target" && action == "test" => {
             test_target(&config_path, name).await
+        }
+        [group, action, name] if group == "target" && action == "capabilities" => {
+            show_capabilities(&config_path, name)
         }
         _ => Err(AppError::Usage(
             "unknown command; run qcli --help for help".into(),
@@ -352,6 +355,34 @@ fn adapters() -> Vec<Arc<dyn EngineAdapter>> {
     ]
 }
 
+fn show_capabilities(path: &Path, target_name: &str) -> Result<(), AppError> {
+    let config = Config::load(path)?;
+    let target = config.target(target_name).ok_or_else(|| ConfigError {
+        path: path.to_path_buf(),
+        line: None,
+        message: format!("target '{target_name}' does not exist"),
+    })?;
+    let adapter = adapters()
+        .into_iter()
+        .find(|adapter| adapter.engine() == target.engine)
+        .ok_or_else(|| CoreError::AdapterNotFound(target.engine.clone()))?;
+    let capabilities = adapter.capabilities();
+    println!("target = {target_name}");
+    println!("engine = {}", target.engine);
+    for capability in AdapterCapability::ALL {
+        println!(
+            "{} = {}",
+            capability.as_str(),
+            if capabilities.supports(capability) {
+                "yes"
+            } else {
+                "no"
+            }
+        );
+    }
+    Ok(())
+}
+
 fn option(
     properties: &std::collections::BTreeMap<String, String>,
     name: &str,
@@ -416,4 +447,5 @@ fn print_help() {
     println!("  target list          List configured targets");
     println!("  target show NAME     Show one resolved target with secrets redacted");
     println!("  target test NAME     Test target connectivity with SELECT 1");
+    println!("  target capabilities NAME  Show supported engine capabilities");
 }

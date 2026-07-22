@@ -3,6 +3,7 @@ members = [
     "crates/qcli-auth",
     "crates/qcli-cli",
     "crates/qcli-config",
+    "crates/qcli-driver-conformance",
     "crates/qcli-core",
     "crates/qcli-driver-api",
     "crates/qcli-driver-databricks",

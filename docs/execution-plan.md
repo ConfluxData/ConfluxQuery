@@ -343,7 +343,7 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 | M6 — Target switching and navigation | Complete | Switch targets and browse warehouse metadata |
 | M7 — Databricks SQL | Implemented; live gate pending | Use the same qcli workflow with Databricks SQL |
 | M8 — Snowflake | Accepted; live validation deferred to M9 | Use the same qcli workflow with Snowflake |
-| M9 — Unified release candidate | Next | Run consistent workflows across all three engines |
+| M9 — Unified release candidate | In progress | Run consistent workflows across all three engines |
 | M10 — Local HTTP query service | Pending | Manage sessions and queries over localhost HTTP |
 | M11 — Production HTTP service | Pending | Secure multi-user HTTP operation with bounded resources |
 | M12 — Packaged release | Pending | Install and run signed cross-platform artifacts |
@@ -590,6 +590,25 @@ Exit gate:
 
 - All three engines pass their required conformance profiles.
 - Cross-engine scenarios and fault-injection tests pass.
+
+Reusable automated gate:
+
+```text
+# Defaults to ~/.qcli/.env and targets trino, databricks-dev, snowflake-dev.
+cargo test -p qcli --test milestone9 \
+  live_three_engine_portable_query_profile -- --ignored --exact
+
+# Select another configuration or section names without duplicating credentials.
+QCLI_M9_CONFIG=/path/to/qcli.env \
+QCLI_M9_TRINO_TARGET=trino-local \
+QCLI_M9_DATABRICKS_TARGET=databricks-dev \
+QCLI_M9_SNOWFLAKE_TARGET=snowflake-dev \
+cargo test -p qcli --test milestone9 \
+  live_three_engine_portable_query_profile -- --ignored --exact
+```
+
+The gate reads resolved target sections through `qcli-config`; secrets are not
+accepted as test command-line arguments and are not printed by the harness.
 
 ### M10 — Local HTTP query service
 
