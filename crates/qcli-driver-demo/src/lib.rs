@@ -8,6 +8,7 @@ use qcli_driver_api::{
     EngineAdapter, MetadataRequest, ObjectKind, ObjectMetadata, QueryEvent, QueryRequest,
     QuerySink, QueryState, SchemaMetadata,
 };
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug, Default)]
@@ -59,6 +60,14 @@ impl EngineAdapter for DemoAdapter {
         }
         if sink.cancellation.is_cancelled() {
             return Err(DriverError::new("cancelled", "query was cancelled"));
+        }
+        if let Some((name, value)) = parse_session_update(statement)? {
+            sink.events
+                .send(QueryEvent::SessionProperties(BTreeMap::from([(
+                    name, value,
+                )])))
+                .await
+                .ok();
         }
         sink.events
             .send(QueryEvent::State(QueryState::ProducingResults))
@@ -159,6 +168,22 @@ impl EngineAdapter for DemoAdapter {
             },
         ])
     }
+}
+
+fn parse_session_update(sql: &str) -> Result<Option<(String, String)>, DriverError> {
+    let Some(value) = sql.strip_prefix("set-session ") else {
+        return Ok(None);
+    };
+    let (name, value) = value.split_once('=').ok_or_else(|| {
+        DriverError::new("invalid_session_update", "set-session requires name=value")
+    })?;
+    if name.is_empty() || value.is_empty() {
+        return Err(DriverError::new(
+            "invalid_session_update",
+            "set-session requires non-empty name and value",
+        ));
+    }
+    Ok(Some((name.into(), value.into())))
 }
 
 fn glob_matches(pattern: Option<&str>, value: &str) -> bool {

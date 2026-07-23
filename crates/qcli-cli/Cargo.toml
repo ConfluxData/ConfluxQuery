@@ -14,6 +14,7 @@ qcli-driver-demo = { path = "../qcli-driver-demo" }
 qcli-driver-databricks = { path = "../qcli-driver-databricks" }
 qcli-driver-snowflake = { path = "../qcli-driver-snowflake" }
 qcli-driver-trino = { path = "../qcli-driver-trino" }
+qcli-http = { path = "../qcli-http" }
 qcli-output = { path = "../qcli-output" }
 qcli-repl = { path = "../qcli-repl" }
 tokio.workspace = true

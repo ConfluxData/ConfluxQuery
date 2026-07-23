@@ -5,6 +5,7 @@ use qcli_driver_databricks::DatabricksAdapter;
 use qcli_driver_demo::DemoAdapter;
 use qcli_driver_snowflake::SnowflakeAdapter;
 use qcli_driver_trino::TrinoAdapter;
+use qcli_http::{HttpLimits, HttpService, bind_local};
 use qcli_output::{DisplayOptions, OutputError, OutputFormat, StreamOutput};
 use qcli_repl::ReplError;
 use std::env;
@@ -25,6 +26,7 @@ enum AppError {
     Input(io::Error),
     Output(OutputError),
     Repl(ReplError),
+    Server(io::Error),
 }
 
 impl AppError {
@@ -43,6 +45,7 @@ impl AppError {
             Self::Query(_) => 5,
             Self::Output(_) => 7,
             Self::Repl(_) => 6,
+            Self::Server(_) => 8,
         }
     }
 
@@ -60,6 +63,7 @@ impl fmt::Display for AppError {
             Self::Input(error) => write!(f, "could not read SQL input: {error}"),
             Self::Output(error) => write!(f, "could not write query results: {error}"),
             Self::Repl(error) => write!(f, "interactive terminal failed: {error}"),
+            Self::Server(error) => write!(f, "HTTP service failed: {error}"),
         }
     }
 }
@@ -173,9 +177,26 @@ async fn run(args: Vec<String>) -> Result<(), AppError> {
         [group, action, name] if group == "target" && action == "capabilities" => {
             show_capabilities(&config_path, name)
         }
+        [serve] if serve == "serve" => serve_http(&config_path, "127.0.0.1:8088").await,
+        [serve, bind, address] if serve == "serve" && bind == "--bind" => {
+            serve_http(&config_path, address).await
+        }
         _ => Err(AppError::Usage(
             "unknown command; run qcli --help for help".into(),
         )),
+    }
+}
+
+async fn serve_http(path: &Path, address: &str) -> Result<(), AppError> {
+    let address = address.parse().map_err(|error| {
+        AppError::Usage(format!("invalid HTTP bind address '{address}': {error}"))
+    })?;
+    let listener = bind_local(address).await.map_err(AppError::Server)?;
+    let service = HttpService::new(Config::load(path)?, adapters(), HttpLimits::default());
+    eprintln!("qcli HTTP preview listening on http://{address}");
+    tokio::select! {
+        result = service.serve(listener) => result.map_err(AppError::Server),
+        result = tokio::signal::ctrl_c() => result.map_err(AppError::Server),
     }
 }
 
@@ -448,4 +469,5 @@ fn print_help() {
     println!("  target show NAME     Show one resolved target with secrets redacted");
     println!("  target test NAME     Test target connectivity with SELECT 1");
     println!("  target capabilities NAME  Show supported engine capabilities");
+    println!("  serve [--bind 127.0.0.1:PORT]  Start the local HTTP preview");
 }

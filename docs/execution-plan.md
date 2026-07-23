@@ -344,7 +344,7 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 | M7 — Databricks SQL | Complete | Use the same qcli workflow with Databricks SQL |
 | M8 — Snowflake | Complete | Use the same qcli workflow with Snowflake |
 | M9 — Unified release candidate | Complete | Run consistent workflows across all three engines |
-| M10 — Local HTTP query service | Pending | Manage sessions and queries over localhost HTTP |
+| M10 — Local HTTP query service | Complete | Manage sessions and queries over localhost HTTP |
 | M11 — Production HTTP service | Pending | Secure multi-user HTTP operation with bounded resources |
 | M12 — Packaged release | Pending | Install and run signed cross-platform artifacts |
 

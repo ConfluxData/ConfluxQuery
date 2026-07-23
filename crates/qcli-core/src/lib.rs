@@ -78,6 +78,20 @@ impl SessionManager {
     /// Panics if another thread poisoned the internal session lock.
     #[must_use]
     pub fn create(&self, target: ResolvedTarget) -> SessionSnapshot {
+        self.create_with_overrides(target, BTreeMap::new())
+    }
+
+    /// Create a version-one session with request-scoped property overrides.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another thread poisoned the internal session lock.
+    #[must_use]
+    pub fn create_with_overrides(
+        &self,
+        target: ResolvedTarget,
+        overrides: BTreeMap<String, String>,
+    ) -> SessionSnapshot {
         let username = target
             .properties
             .get("user")
@@ -90,7 +104,7 @@ impl SessionManager {
             id: id.clone(),
             version: 1,
             target,
-            overrides: BTreeMap::new(),
+            overrides,
         };
         let snapshot = snapshot(&session);
         self.sessions
@@ -134,6 +148,24 @@ impl SessionManager {
         name: String,
         value: String,
     ) -> Result<SessionSnapshot, CoreError> {
+        self.set_options(id, expected_version, BTreeMap::from([(name, value)]))
+    }
+
+    /// Atomically apply multiple session overrides with one version increment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session or stale expected version.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another thread poisoned the internal session lock.
+    pub fn set_options(
+        &self,
+        id: &str,
+        expected_version: u64,
+        values: BTreeMap<String, String>,
+    ) -> Result<SessionSnapshot, CoreError> {
         let mut sessions = self.sessions.lock().expect("session mutex poisoned");
         let session = sessions
             .get_mut(id)
@@ -144,7 +176,7 @@ impl SessionManager {
                 actual: session.version,
             });
         }
-        session.overrides.insert(name, value);
+        session.overrides.extend(values);
         session.version += 1;
         Ok(snapshot(session))
     }
@@ -176,6 +208,24 @@ impl SessionManager {
         session.overrides.clear();
         session.version += 1;
         Ok(snapshot(session))
+    }
+
+    /// Remove a logical session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::SessionNotFound`] for an unknown session ID.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another thread poisoned the internal session lock.
+    pub fn close(&self, id: &str) -> Result<(), CoreError> {
+        self.sessions
+            .lock()
+            .expect("session mutex poisoned")
+            .remove(id)
+            .map(|_| ())
+            .ok_or_else(|| CoreError::SessionNotFound(id.into()))
     }
 }
 
@@ -279,6 +329,11 @@ impl QueryHandle {
     }
     pub fn cancel(&self) {
         self.cancellation.cancel();
+    }
+
+    #[must_use]
+    pub fn cancellation_signal(&self) -> CancellationSignal {
+        self.cancellation.clone()
     }
     /// Wait for adapter execution and return its final outcome.
     ///

@@ -15,6 +15,18 @@ Inspect an engine's normalized capabilities without connecting:
 qcli target capabilities TARGET
 ```
 
+Start the loopback-only HTTP preview:
+
+```text
+qcli serve
+```
+
+The versioned API creates persistent sessions, submits asynchronous session or
+stateless queries, reports status, streams SSE events, cancels work, and returns
+paginated JSON, NDJSON, CSV, or Arrow-stream results. See the
+[Milestone 10 notes](docs/milestones/milestone-10-notes.md) for the endpoint
+contract and runnable examples.
+
 The project is under sequenced implementation. See the [product design](docs/product-design.md) and [execution plan](docs/execution-plan.md).
 
 ## Current milestone
