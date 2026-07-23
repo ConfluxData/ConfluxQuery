@@ -1,6 +1,6 @@
 # Milestone 7 Notes: Databricks SQL
 
-Status: Implementation complete; live Databricks gate pending
+Status: Complete
 
 Implemented: 2026-07-21
 

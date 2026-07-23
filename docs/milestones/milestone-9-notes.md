@@ -1,8 +1,8 @@
 # Milestone 9 Notes: Unified Release Candidate
 
-Status: Implemented; live three-engine gate pending
+Status: Complete
 
-Implemented: 2026-07-22
+Completed: 2026-07-23
 
 ## Demonstrable outcome
 
@@ -25,9 +25,8 @@ qcli target capabilities snowflake-dev
 The adapters and CLI paths are implemented for all three engines. Trino and
 Databricks were exercised during their implementation milestones. On 2026-07-23,
 Snowflake PAT authentication through the current password field, `SELECT 1`, and
-a ten-row sample-data query were also demonstrated. The broader three-engine
-conformance and Snowflake validation matrix remain pending, so Milestone 9 is not
-marked fully complete.
+a ten-row sample-data query were demonstrated. The corrected portable profile
+then passed against configured live Trino, Databricks, and Snowflake targets.
 
 ## Implemented
 
@@ -53,8 +52,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 The deterministic Milestone 9 capability profile passes for all three adapters.
-The live profile remains ignored by default because it requires three configured
-engines and credentials.
+The credential-gated live profile passed on 2026-07-23. It remains ignored by
+default because ordinary workspace and CI runs do not have three live engines or
+their credentials.
 
 Run the live profile with the default target names:
 
@@ -68,17 +68,31 @@ Target section names and the configuration path can be selected through
 `QCLI_M9_SNOWFLAKE_TARGET`. Credentials remain in configuration/environment
 resolution and are neither accepted as test arguments nor printed.
 
-## Remaining release gate
+## Live gate evidence
 
-Before declaring Milestone 9 complete, record a successful live profile across
-all three engines and complete the broader Snowflake validation matrix inherited
-from Milestone 8. Known gaps remain:
+The live profile executed one portable query containing integer, fixed decimal,
+Unicode text, and null values through each engine adapter:
+
+```text
+QCLI_M9_TRINO_TARGET=trino-local \
+QCLI_M9_DATABRICKS_TARGET=databricks-dev \
+QCLI_M9_SNOWFLAKE_TARGET=snowflake-dev \
+cargo test -p qcli --test milestone9 \
+  live_three_engine_portable_query_profile -- --ignored --exact
+```
+
+The original profile used an unbounded `VARCHAR`, which Databricks correctly
+rejected. The shared SQL now uses `VARCHAR(100)`, which passed all three engines.
+
+## Accepted release-candidate limitations
+
+The following remain explicit follow-up work:
 
 - Snowflake server-side query cancellation is unavailable through the selected
   client because it does not expose the required query ID/cancellation API.
 - Snowflake PAT smoke execution is confirmed; password/MFA, large multi-chunk
   results, exact type coverage, renewal, and failure paths still require live
-  validation.
+  hardening.
 - Databricks qualified `USE SCHEMA catalog.schema` behavior is engine-specific;
   catalog and schema changes should continue to be issued separately where
   required by Unity Catalog.

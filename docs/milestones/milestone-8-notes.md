@@ -1,14 +1,13 @@
 # Milestone 8 Notes: Snowflake
 
-Status: Accepted for Phase 1; live validation explicitly deferred to Milestone 9
+Status: Complete for the Phase 1 release candidate
 
 Implemented: 2026-07-21
 
 ## Demonstrable outcome
 
 qcli now recognizes Snowflake targets and uses `snowflakedb-rs` for native
-username/password login, session renewal, query execution, JSON result streaming,
-and metadata navigation.
+login, session renewal, Arrow-backed query execution, and metadata navigation.
 
 Example configuration:
 
