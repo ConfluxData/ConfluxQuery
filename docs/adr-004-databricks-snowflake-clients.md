@@ -101,9 +101,11 @@ support or a small maintained extension for:
 - explicit proxy, timeout, TLS, and retry configuration tests;
 - confirmation that secrets cannot appear through `Debug` or error paths;
 - Arrow version compatibility with qcli's common result model. At selection time,
-  `snowflakedb-rs` 1.1.7 depends on Arrow 57 while qcli uses Arrow 59. Shipping
-  both versions or copying every batch is not acceptable without measurement;
-  prefer an upstream Arrow upgrade or a compatible release before integration.
+  `snowflakedb-rs` 1.1.7 depends on Arrow 57 while qcli uses Arrow 59. The adapter
+  currently contains the version boundary by consuming the client's neutral
+  `Row` stream after its internal Arrow decode, then building bounded qcli Arrow
+  59 batches. Measure the duplicate dependency and conversion cost, and prefer an
+  upstream Arrow upgrade or compatible release when available.
 
 These gaps do not block the initial password spike, but they block claims of broad
 enterprise authentication support. Prefer upstream contributions over a long-lived

@@ -12,7 +12,7 @@ use qcli_driver_api::{
 };
 use snowflakedb_rs::auth::AuthStrategy;
 use snowflakedb_rs::{
-    Column, Executor, JsonSnowflakeConnection, Query, QueryResult, Row,
+    ArrowSnowflakeConnection, Column, Executor, Query, QueryResult, Row,
     SnowflakeConnectionOptsBuilder,
 };
 use std::collections::BTreeMap;
@@ -47,6 +47,7 @@ impl EngineAdapter for SnowflakeAdapter {
             .ok();
         let query = connection.query(&request.sql).await.map_err(sf_error)?;
         let result = query.execute().await.map_err(sf_error)?;
+        let expected = result.expected_result_length();
         let columns = result.columns();
         let mut stream = result.rows();
         let mut buffered = Vec::with_capacity(BATCH_ROWS);
@@ -69,6 +70,7 @@ impl EngineAdapter for SnowflakeAdapter {
             total += buffered.len();
             let _ = send_batch(&sink, &columns, &mut buffered, producing).await?;
         }
+        validate_row_count(expected, total)?;
         if let Some(properties) = session_update(&request.sql) {
             sink.events
                 .send(QueryEvent::SessionProperties(properties))
@@ -168,7 +170,7 @@ impl EngineAdapter for SnowflakeAdapter {
 
 async fn connect(
     properties: &BTreeMap<String, String>,
-) -> Result<JsonSnowflakeConnection, DriverError> {
+) -> Result<ArrowSnowflakeConnection, DriverError> {
     let auth_type = properties
         .get("auth_type")
         .map_or("password", String::as_str);
@@ -207,8 +209,24 @@ async fn connect(
     let options = builder
         .build()
         .map_err(|error| DriverError::new("configuration", error.to_string()))?;
-    let pool = options.connect_json().await.map_err(sf_error)?;
+    let pool = options.connect_arrow().await.map_err(sf_error)?;
     pool.get().await.map_err(sf_error)
+}
+
+fn validate_row_count(expected: i64, actual: usize) -> Result<(), DriverError> {
+    let expected = usize::try_from(expected).map_err(|_| {
+        DriverError::new(
+            "snowflake_result",
+            format!("Snowflake returned invalid expected row count {expected}"),
+        )
+    })?;
+    if expected != actual {
+        return Err(DriverError::new(
+            "snowflake_result",
+            format!("Snowflake reported {expected} rows but the driver decoded {actual}"),
+        ));
+    }
+    Ok(())
 }
 
 async fn send_batch(
@@ -406,5 +424,17 @@ mod tests {
             session_update("USE WAREHOUSE REPORTING_WH;").unwrap()["warehouse"],
             "REPORTING_WH"
         );
+    }
+
+    #[test]
+    fn detects_silently_dropped_snowflake_rows() {
+        let error = validate_row_count(10, 0).unwrap_err();
+        assert_eq!(error.code, "snowflake_result");
+        assert!(error.message.contains("reported 10 rows"));
+    }
+
+    #[test]
+    fn accepts_fully_decoded_snowflake_rows() {
+        validate_row_count(10, 10).unwrap();
     }
 }

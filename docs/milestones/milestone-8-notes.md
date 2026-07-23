@@ -60,7 +60,9 @@ the frontend or core contracts.
 - Native Snowflake session login and automatic session-token renewal supplied by
   the selected client.
 - Warehouse, database, schema, and role initialization.
-- JSON result streaming in bounded 1,000-row Arrow 59 batches.
+- Arrow result decoding through the client's Arrow 57 implementation, converted
+  through its neutral row representation into bounded 1,000-row qcli Arrow 59
+  batches.
 - Four-way parallel Snowflake chunk download while preserving chunk order.
 - Exact decimal and timestamp parsing through the client's `decimal` and
   `chrono` features, serialized without deliberate display truncation into the
@@ -71,14 +73,16 @@ the frontend or core contracts.
   statements update terminal session context.
 - CLI adapter registration for batch, target testing, and interactive use.
 
-## Why JSON streaming in this cut
+## Arrow version boundary
 
 qcli uses Arrow 59 while `snowflakedb-rs` 1.1.7 uses Arrow 57. Enabling its Arrow
-feature would place incompatible Arrow types in one process and could require
-copying every result batch. The JSON streaming path still downloads chunks in
-parallel and preserves exact values. We should enable native Arrow after the
-client publishes a compatible Arrow version or after measurement supports a
-specific conversion strategy.
+feature places both versions in one process, but their concrete batch types do
+not cross the adapter boundary. The client decodes Snowflake's binary chunks and
+exposes neutral `Row` values; qcli then builds its own Arrow 59 batches.
+
+The original JSON path silently returned zero rows when Snowflake supplied
+`rowsetBase64` results. The adapter now requests Arrow explicitly and rejects any
+reported-versus-decoded row-count mismatch instead of accepting silent data loss.
 
 ## Verification
 
@@ -92,6 +96,12 @@ cargo test -p qcli-driver-snowflake
 Focused tests cover credential redaction, identifier quoting, metadata pattern
 matching, and session-context parsing. The selected crate and all required
 features compile on qcli's Rust 1.86 baseline.
+
+Live smoke validation on 2026-07-23 confirmed that a Snowflake PAT supplied
+through the current password field authenticates successfully, `SELECT 1`
+returns one row, and
+`SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.NATION LIMIT 10` returns ten rows through the
+Arrow-backed path.
 
 ## Deferred live gate inherited by Milestone 9
 

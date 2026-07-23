@@ -23,9 +23,11 @@ qcli target capabilities snowflake-dev
 ```
 
 The adapters and CLI paths are implemented for all three engines. Trino and
-Databricks have been exercised during their implementation milestones. The
-Snowflake adapter has not yet been demonstrated against a live Snowflake account
-in the implementation environment, so Milestone 9 is not marked fully complete.
+Databricks were exercised during their implementation milestones. On 2026-07-23,
+Snowflake PAT authentication through the current password field, `SELECT 1`, and
+a ten-row sample-data query were also demonstrated. The broader three-engine
+conformance and Snowflake validation matrix remain pending, so Milestone 9 is not
+marked fully complete.
 
 ## Implemented
 
@@ -74,8 +76,9 @@ from Milestone 8. Known gaps remain:
 
 - Snowflake server-side query cancellation is unavailable through the selected
   client because it does not expose the required query ID/cancellation API.
-- Snowflake password authentication and query/result compatibility require live
-  account validation.
+- Snowflake PAT smoke execution is confirmed; password/MFA, large multi-chunk
+  results, exact type coverage, renewal, and failure paths still require live
+  validation.
 - Databricks qualified `USE SCHEMA catalog.schema` behavior is engine-specific;
   catalog and schema changes should continue to be issued separately where
   required by Unity Catalog.
