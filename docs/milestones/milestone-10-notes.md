@@ -14,6 +14,18 @@ qcli serve
 qcli serve --bind 127.0.0.1:18088
 ```
 
+API discovery:
+
+```text
+http://127.0.0.1:8088/docs/
+http://127.0.0.1:8088/openapi.json
+```
+
+Swagger UI is embedded in the executable and does not depend on a CDN. The
+OpenAPI 3 contract is generated from the Rust request/response DTOs and route
+annotations using `utoipa`, so the browser documentation and running handlers
+share one source tree.
+
 The server calls `SessionManager`, `QueryService`, and the registered engine
 adapters directly. It never shells out to the qcli executable.
 
@@ -127,6 +139,10 @@ pagination, invalid/opaque tokens, SSE replay and terminal events, JSON and CSV
 results, Arrow-stream results, terminal/HTTP output parity, engine-returned
 session state, memory-to-disk spill, spill cleanup, result caps, TTL expiry, and
 refusal of non-loopback binding.
+
+The generated OpenAPI contract test also verifies all version-one paths, the
+primary session/query/error schemas, the `/openapi.json` response, and the
+embedded Swagger UI page.
 
 An end-to-end process demo using the deterministic demo adapter confirmed:
 

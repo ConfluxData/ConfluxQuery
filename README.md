@@ -21,6 +21,9 @@ Start the loopback-only HTTP preview:
 qcli serve
 ```
 
+Then open `http://127.0.0.1:8088/docs/` for interactive Swagger UI or fetch
+`http://127.0.0.1:8088/openapi.json` for the generated OpenAPI contract.
+
 The versioned API creates persistent sessions, submits asynchronous session or
 stateless queries, reports status, streams SSE events, cancels work, and returns
 paginated JSON, NDJSON, CSV, or Arrow-stream results. See the

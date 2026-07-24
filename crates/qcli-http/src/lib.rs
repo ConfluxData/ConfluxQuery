@@ -28,6 +28,8 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
+use utoipa::{IntoParams, OpenApi, ToSchema};
+use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
 
 const LOCAL_OWNER: &str = "local";
@@ -120,10 +122,15 @@ struct EventEntry {
     terminal: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 struct ApiErrorBody {
     code: String,
     message: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct ApiErrorResponse {
+    error: ApiErrorBody,
 }
 
 #[derive(Debug)]
@@ -180,6 +187,7 @@ impl HttpService {
     }
 
     pub fn router(&self) -> Router {
+        let openapi = ApiDoc::openapi();
         Router::new()
             .route("/v1/sessions", post(create_session))
             .route(
@@ -206,6 +214,7 @@ impl HttpService {
             .route("/v1/queries/{query_id}/results", get(get_results))
             .route("/v1/queries/{query_id}/events", get(get_events))
             .route("/v1/queries/{query_id}/cancel", post(cancel_query))
+            .merge(SwaggerUi::new("/docs").url("/openapi.json", openapi))
             .with_state(self.state.clone())
     }
 
@@ -219,7 +228,7 @@ impl HttpService {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct CreateSessionRequest {
     target: String,
     #[serde(default)]
@@ -230,7 +239,7 @@ struct CreateSessionRequest {
     options: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct UpdateSessionRequest {
     expected_version: u64,
     #[serde(default)]
@@ -241,18 +250,18 @@ struct UpdateSessionRequest {
     options: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct SwitchTargetRequest {
     expected_version: u64,
     target: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct QueryRequest {
     sql: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct StatelessQueryRequest {
     target: String,
     sql: String,
@@ -262,7 +271,7 @@ struct StatelessQueryRequest {
     properties: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct SessionResponse {
     id: String,
     version: u64,
@@ -281,7 +290,7 @@ impl From<SessionSnapshot> for SessionResponse {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct QueryResponse {
     id: String,
     session_id: String,
@@ -294,6 +303,62 @@ struct QueryResponse {
     error: Option<ApiErrorBody>,
 }
 
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "qcli Local HTTP API",
+        version = "1.0.0",
+        description = "Versioned, loopback-only preview API backed by qcli's shared session and query core."
+    ),
+    paths(
+        create_session,
+        get_session,
+        update_session,
+        update_session_properties,
+        update_session_options,
+        switch_session_target,
+        delete_session,
+        submit_session_query,
+        submit_stateless_query,
+        get_query,
+        get_results,
+        get_events,
+        cancel_query
+    ),
+    components(schemas(
+        ApiErrorBody,
+        ApiErrorResponse,
+        CreateSessionRequest,
+        UpdateSessionRequest,
+        SwitchTargetRequest,
+        QueryRequest,
+        StatelessQueryRequest,
+        SessionResponse,
+        QueryResponse
+    )),
+    tags(
+        (name = "sessions", description = "Persistent versioned sessions"),
+        (name = "queries", description = "Asynchronous query execution, events, results, and cancellation")
+    )
+)]
+struct ApiDoc;
+
+#[must_use]
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    ApiDoc::openapi()
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/sessions",
+    tag = "sessions",
+    request_body = CreateSessionRequest,
+    responses(
+        (status = 201, description = "Session created", body = SessionResponse),
+        (status = 400, description = "Invalid request", body = ApiErrorResponse),
+        (status = 404, description = "Target not found", body = ApiErrorResponse)
+    )
+)]
 async fn create_session(
     State(state): State<AppState>,
     Json(request): Json<CreateSessionRequest>,
@@ -306,6 +371,16 @@ async fn create_session(
     Ok((StatusCode::CREATED, Json(snapshot.into())))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/sessions/{session_id}",
+    tag = "sessions",
+    params(("session_id" = String, Path, description = "Logical session ID")),
+    responses(
+        (status = 200, description = "Current session", body = SessionResponse),
+        (status = 404, description = "Session not found", body = ApiErrorResponse)
+    )
+)]
 async fn get_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -319,6 +394,19 @@ async fn get_session(
     ))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/v1/sessions/{session_id}",
+    tag = "sessions",
+    params(("session_id" = String, Path, description = "Logical session ID")),
+    request_body = UpdateSessionRequest,
+    responses(
+        (status = 200, description = "Updated session", body = SessionResponse),
+        (status = 400, description = "Invalid property", body = ApiErrorResponse),
+        (status = 404, description = "Session not found", body = ApiErrorResponse),
+        (status = 409, description = "Stale expected version", body = ApiErrorResponse)
+    )
+)]
 async fn update_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -334,6 +422,46 @@ async fn update_session(
     Ok(Json(snapshot.into()))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/v1/sessions/{session_id}/properties",
+    tag = "sessions",
+    params(("session_id" = String, Path, description = "Logical session ID")),
+    request_body = UpdateSessionRequest,
+    responses(
+        (status = 200, description = "Updated session", body = SessionResponse),
+        (status = 409, description = "Stale expected version", body = ApiErrorResponse)
+    )
+)]
+#[allow(dead_code, reason = "OpenAPI-only operation for a shared HTTP handler")]
+fn update_session_properties() {}
+
+#[utoipa::path(
+    patch,
+    path = "/v1/sessions/{session_id}/options",
+    tag = "sessions",
+    params(("session_id" = String, Path, description = "Logical session ID")),
+    request_body = UpdateSessionRequest,
+    responses(
+        (status = 200, description = "Updated session", body = SessionResponse),
+        (status = 409, description = "Stale expected version", body = ApiErrorResponse)
+    )
+)]
+#[allow(dead_code, reason = "OpenAPI-only operation for a shared HTTP handler")]
+fn update_session_options() {}
+
+#[utoipa::path(
+    post,
+    path = "/v1/sessions/{session_id}/target",
+    tag = "sessions",
+    params(("session_id" = String, Path, description = "Logical session ID")),
+    request_body = SwitchTargetRequest,
+    responses(
+        (status = 200, description = "Session switched atomically", body = SessionResponse),
+        (status = 404, description = "Session or target not found", body = ApiErrorResponse),
+        (status = 409, description = "Stale expected version", body = ApiErrorResponse)
+    )
+)]
 async fn switch_session_target(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -347,6 +475,16 @@ async fn switch_session_target(
     Ok(Json(snapshot.into()))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/v1/sessions/{session_id}",
+    tag = "sessions",
+    params(("session_id" = String, Path, description = "Logical session ID")),
+    responses(
+        (status = 204, description = "Session closed"),
+        (status = 404, description = "Session not found", body = ApiErrorResponse)
+    )
+)]
 async fn delete_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -358,6 +496,19 @@ async fn delete_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/sessions/{session_id}/queries",
+    tag = "queries",
+    params(("session_id" = String, Path, description = "Logical session ID")),
+    request_body = QueryRequest,
+    responses(
+        (status = 202, description = "Query accepted", body = QueryResponse),
+        (status = 404, description = "Session not found", body = ApiErrorResponse),
+        (status = 413, description = "SQL exceeds request limit", body = ApiErrorResponse),
+        (status = 429, description = "Retained query limit reached", body = ApiErrorResponse)
+    )
+)]
 async fn submit_session_query(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -370,6 +521,18 @@ async fn submit_session_query(
     submit_query(&state, &snapshot, request.sql, false)
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/queries",
+    tag = "queries",
+    request_body = StatelessQueryRequest,
+    responses(
+        (status = 202, description = "Stateless query accepted", body = QueryResponse),
+        (status = 404, description = "Target not found", body = ApiErrorResponse),
+        (status = 413, description = "SQL exceeds request limit", body = ApiErrorResponse),
+        (status = 429, description = "Retained query limit reached", body = ApiErrorResponse)
+    )
+)]
 async fn submit_stateless_query(
     State(state): State<AppState>,
     Json(request): Json<StatelessQueryRequest>,
@@ -610,6 +773,16 @@ fn push_event(record: &QueryRecord, event: &str, value: Value, terminal: bool) {
     record.events.send(entry).ok();
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/queries/{query_id}",
+    tag = "queries",
+    params(("query_id" = String, Path, description = "Opaque HTTP query ID")),
+    responses(
+        (status = 200, description = "Query status", body = QueryResponse),
+        (status = 404, description = "Query not found or expired", body = ApiErrorResponse)
+    )
+)]
 async fn get_query(
     State(state): State<AppState>,
     Path(query_id): Path<String>,
@@ -618,6 +791,16 @@ async fn get_query(
     Ok(Json(query_response(record.as_ref())))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/queries/{query_id}/cancel",
+    tag = "queries",
+    params(("query_id" = String, Path, description = "Opaque HTTP query ID")),
+    responses(
+        (status = 202, description = "Cancellation requested", body = QueryResponse),
+        (status = 404, description = "Query not found or expired", body = ApiErrorResponse)
+    )
+)]
 async fn cancel_query(
     State(state): State<AppState>,
     Path(query_id): Path<String>,
@@ -628,12 +811,28 @@ async fn cancel_query(
     Ok((StatusCode::ACCEPTED, Json(query_response(&record))))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 struct ResultsQuery {
     page_token: Option<String>,
     limit: Option<usize>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/queries/{query_id}/results",
+    tag = "queries",
+    params(
+        ("query_id" = String, Path, description = "Opaque HTTP query ID"),
+        ResultsQuery
+    ),
+    responses(
+        (status = 200, description = "Paginated result. Content negotiation supports application/json, application/x-ndjson, text/csv, and application/vnd.apache.arrow.stream"),
+        (status = 400, description = "Invalid page token", body = ApiErrorResponse),
+        (status = 404, description = "Query not found or expired", body = ApiErrorResponse),
+        (status = 409, description = "Query is still running", body = ApiErrorResponse),
+        (status = 422, description = "Query or retention failed", body = ApiErrorResponse)
+    )
+)]
 async fn get_results(
     State(state): State<AppState>,
     Path(query_id): Path<String>,
@@ -725,6 +924,19 @@ async fn get_results(
     Ok(response)
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/queries/{query_id}/events",
+    tag = "queries",
+    params(
+        ("query_id" = String, Path, description = "Opaque HTTP query ID"),
+        ("Last-Event-ID" = Option<u64>, Header, description = "Resume after this SSE event ID")
+    ),
+    responses(
+        (status = 200, description = "Replayable live server-sent event stream"),
+        (status = 404, description = "Query not found or expired", body = ApiErrorResponse)
+    )
+)]
 async fn get_events(
     State(state): State<AppState>,
     Path(query_id): Path<String>,
@@ -1564,5 +1776,70 @@ mod tests {
     async fn preview_refuses_non_loopback_binding() {
         let error = bind_local("0.0.0.0:0".parse().unwrap()).await.unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn generated_openapi_and_swagger_ui_expose_the_contract() {
+        let document = serde_json::to_value(openapi()).unwrap();
+        let paths = document["paths"].as_object().unwrap();
+        for path in [
+            "/v1/sessions",
+            "/v1/sessions/{session_id}",
+            "/v1/sessions/{session_id}/target",
+            "/v1/sessions/{session_id}/properties",
+            "/v1/sessions/{session_id}/options",
+            "/v1/sessions/{session_id}/queries",
+            "/v1/queries",
+            "/v1/queries/{query_id}",
+            "/v1/queries/{query_id}/results",
+            "/v1/queries/{query_id}/events",
+            "/v1/queries/{query_id}/cancel",
+        ] {
+            assert!(paths.contains_key(path), "missing OpenAPI path {path}");
+        }
+        let schemas = document["components"]["schemas"].as_object().unwrap();
+        for schema in [
+            "CreateSessionRequest",
+            "SessionResponse",
+            "QueryRequest",
+            "QueryResponse",
+            "ApiErrorResponse",
+        ] {
+            assert!(
+                schemas.contains_key(schema),
+                "missing OpenAPI schema {schema}"
+            );
+        }
+
+        let router = service(HttpLimits::default()).router();
+        let specification = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/openapi.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(specification.status(), StatusCode::OK);
+        let specification = json_body(specification).await;
+        assert_eq!(specification["info"]["title"], "qcli Local HTTP API");
+
+        let documentation = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/docs/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(documentation.status(), StatusCode::OK);
+        let html = to_bytes(documentation.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&html).contains("Swagger UI"));
     }
 }
