@@ -4,14 +4,16 @@ use arrow_array::RecordBatch;
 use arrow_ipc::reader::FileReader;
 use arrow_ipc::writer::{FileWriter, StreamWriter};
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use base64::Engine;
 use futures_util::StreamExt;
+use qcli_auth::{AuthenticatedPrincipal, AuthenticationErrorKind, Authenticator};
 use qcli_config::{Config, ResolvedTarget};
 use qcli_core::{CoreError, QueryItem, QueryService, SessionManager, SessionSnapshot};
 use qcli_driver_api::{CancellationSignal, EngineAdapter, QueryEvent, QueryProgress, QueryState};
@@ -28,11 +30,10 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
-use utoipa::{IntoParams, OpenApi, ToSchema};
+use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
+use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
-
-const LOCAL_OWNER: &str = "local";
 
 #[derive(Debug, Clone)]
 pub struct HttpLimits {
@@ -63,15 +64,17 @@ impl Default for HttpLimits {
 struct AppState {
     config: Arc<Config>,
     sessions: Arc<SessionManager>,
+    session_owners: Arc<Mutex<HashMap<String, String>>>,
     queries: Arc<QueryService>,
     records: Arc<Mutex<HashMap<String, Arc<QueryRecord>>>>,
     limits: HttpLimits,
     page_secret: u64,
+    authenticator: Option<Arc<dyn Authenticator>>,
 }
 
 struct QueryRecord {
     id: String,
-    owner: &'static str,
+    owner: String,
     session_id: String,
     session_version: u64,
     target: String,
@@ -153,7 +156,14 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(json!({ "error": self.body }))).into_response()
+        let unauthorized = self.status == StatusCode::UNAUTHORIZED;
+        let mut response = (self.status, Json(json!({ "error": self.body }))).into_response();
+        if unauthorized {
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        }
+        response
     }
 }
 
@@ -178,17 +188,25 @@ impl HttpService {
             state: AppState {
                 config: Arc::new(config),
                 sessions: Arc::new(SessionManager::default()),
+                session_owners: Arc::new(Mutex::new(HashMap::new())),
                 queries: Arc::new(QueryService::new(adapters, 8)),
                 records: Arc::new(Mutex::new(HashMap::new())),
                 limits,
                 page_secret,
+                authenticator: None,
             },
         }
     }
 
+    #[must_use]
+    pub fn with_authenticator(mut self, authenticator: Arc<dyn Authenticator>) -> Self {
+        self.state.authenticator = Some(authenticator);
+        self
+    }
+
     pub fn router(&self) -> Router {
         let openapi = ApiDoc::openapi();
-        Router::new()
+        let api = Router::new()
             .route("/v1/sessions", post(create_session))
             .route(
                 "/v1/sessions/{session_id}",
@@ -214,7 +232,11 @@ impl HttpService {
             .route("/v1/queries/{query_id}/results", get(get_results))
             .route("/v1/queries/{query_id}/events", get(get_events))
             .route("/v1/queries/{query_id}/cancel", post(cancel_query))
-            .merge(SwaggerUi::new("/docs").url("/openapi.json", openapi))
+            .route_layer(middleware::from_fn_with_state(
+                self.state.clone(),
+                authenticate_request,
+            ));
+        api.merge(SwaggerUi::new("/docs").url("/openapi.json", openapi))
             .with_state(self.state.clone())
     }
 
@@ -226,6 +248,44 @@ impl HttpService {
     pub async fn serve(self, listener: TcpListener) -> std::io::Result<()> {
         axum::serve(listener, self.router()).await
     }
+}
+
+async fn authenticate_request(
+    State(state): State<AppState>,
+    mut request: axum::extract::Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let principal = if let Some(authenticator) = &state.authenticator {
+        let bearer = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::UNAUTHORIZED,
+                    "authentication_required",
+                    "a bearer credential is required",
+                )
+            })?;
+        authenticator.authenticate(bearer).await.map_err(|error| {
+            let status = if error.kind == AuthenticationErrorKind::Configuration {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::UNAUTHORIZED
+            };
+            ApiError::new(status, "authentication_failed", error.message)
+        })?
+    } else {
+        AuthenticatedPrincipal {
+            id: "local".into(),
+            allowed_targets: ["*".into()].into_iter().collect(),
+            max_sessions: usize::MAX,
+            max_concurrent_queries: usize::MAX,
+        }
+    };
+    request.extensions_mut().insert(principal);
+    Ok(next.run(request).await)
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -339,9 +399,24 @@ struct QueryResponse {
     tags(
         (name = "sessions", description = "Persistent versioned sessions"),
         (name = "queries", description = "Asynchronous query execution, events, results, and cancellation")
-    )
+    ),
+    modifiers(&SecurityAddon),
+    security(("bearer_auth" = []))
 )]
 struct ApiDoc;
+
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        if let Some(components) = openapi.components.as_mut() {
+            components.add_security_scheme(
+                "bearer_auth",
+                SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+            );
+        }
+    }
+}
 
 #[must_use]
 pub fn openapi() -> utoipa::openapi::OpenApi {
@@ -361,13 +436,20 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
 )]
 async fn create_session(
     State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Json(request): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<SessionResponse>), ApiError> {
-    let target = target(&state, &request.target)?;
+    enforce_session_quota(&state, &principal)?;
+    let target = target(&state, &principal, &request.target)?;
     let mut overrides = values(request.context)?;
     overrides.extend(values(request.properties)?);
     overrides.extend(values(request.options)?);
     let snapshot = state.sessions.create_with_overrides(target, overrides);
+    state
+        .session_owners
+        .lock()
+        .expect("session owner mutex poisoned")
+        .insert(snapshot.id.clone(), principal.id);
     Ok((StatusCode::CREATED, Json(snapshot.into())))
 }
 
@@ -383,8 +465,10 @@ async fn create_session(
 )]
 async fn get_session(
     State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionResponse>, ApiError> {
+    require_session_owner(&state, &principal, &session_id)?;
     Ok(Json(
         state
             .sessions
@@ -409,9 +493,11 @@ async fn get_session(
 )]
 async fn update_session(
     State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(session_id): Path<String>,
     Json(request): Json<UpdateSessionRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
+    require_session_owner(&state, &principal, &session_id)?;
     let mut overrides = values(request.context)?;
     overrides.extend(values(request.properties)?);
     overrides.extend(values(request.options)?);
@@ -464,10 +550,12 @@ fn update_session_options() {}
 )]
 async fn switch_session_target(
     State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(session_id): Path<String>,
     Json(request): Json<SwitchTargetRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    let target = target(&state, &request.target)?;
+    require_session_owner(&state, &principal, &session_id)?;
+    let target = target(&state, &principal, &request.target)?;
     let snapshot = state
         .sessions
         .switch_target(&session_id, request.expected_version, target)
@@ -487,12 +575,19 @@ async fn switch_session_target(
 )]
 async fn delete_session(
     State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    require_session_owner(&state, &principal, &session_id)?;
     state
         .sessions
         .close(&session_id)
         .map_err(|error| core_error(&error))?;
+    state
+        .session_owners
+        .lock()
+        .expect("session owner mutex poisoned")
+        .remove(&session_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -511,14 +606,16 @@ async fn delete_session(
 )]
 async fn submit_session_query(
     State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(session_id): Path<String>,
     Json(request): Json<QueryRequest>,
 ) -> Result<(StatusCode, Json<QueryResponse>), ApiError> {
+    require_session_owner(&state, &principal, &session_id)?;
     let snapshot = state
         .sessions
         .snapshot(&session_id)
         .map_err(|error| core_error(&error))?;
-    submit_query(&state, &snapshot, request.sql, false)
+    submit_query(&state, &principal, &snapshot, request.sql, false)
 }
 
 #[utoipa::path(
@@ -535,17 +632,24 @@ async fn submit_session_query(
 )]
 async fn submit_stateless_query(
     State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Json(request): Json<StatelessQueryRequest>,
 ) -> Result<(StatusCode, Json<QueryResponse>), ApiError> {
-    let target = target(&state, &request.target)?;
+    let target = target(&state, &principal, &request.target)?;
     let mut overrides = values(request.context)?;
     overrides.extend(values(request.properties)?);
     let snapshot = state.sessions.create_with_overrides(target, overrides);
-    submit_query(&state, &snapshot, request.sql, true)
+    state
+        .session_owners
+        .lock()
+        .expect("session owner mutex poisoned")
+        .insert(snapshot.id.clone(), principal.id.clone());
+    submit_query(&state, &principal, &snapshot, request.sql, true)
 }
 
 fn submit_query(
     state: &AppState,
+    principal: &AuthenticatedPrincipal,
     snapshot: &SessionSnapshot,
     sql: String,
     close_session: bool,
@@ -558,6 +662,7 @@ fn submit_query(
         ));
     }
     cleanup_expired(state);
+    enforce_query_quota(state, principal)?;
     {
         let records = state.records.lock().expect("query registry mutex poisoned");
         if records.len() >= state.limits.max_queries {
@@ -577,7 +682,7 @@ fn submit_query(
     let (events, _) = broadcast::channel(128);
     let record = Arc::new(QueryRecord {
         id: id.clone(),
-        owner: LOCAL_OWNER,
+        owner: principal.id.clone(),
         session_id: snapshot.id.clone(),
         session_version: snapshot.version,
         target: snapshot.target.clone(),
@@ -604,6 +709,7 @@ fn submit_query(
     let response = query_response(&record);
     tokio::spawn(collect_query(
         state.sessions.clone(),
+        state.session_owners.clone(),
         record,
         handle,
         state.limits.clone(),
@@ -614,6 +720,7 @@ fn submit_query(
 
 async fn collect_query(
     sessions: Arc<SessionManager>,
+    session_owners: Arc<Mutex<HashMap<String, String>>>,
     record: Arc<QueryRecord>,
     mut handle: qcli_core::QueryHandle,
     limits: HttpLimits,
@@ -669,6 +776,10 @@ async fn collect_query(
             );
             if close_session {
                 sessions.close(&record.session_id).ok();
+                session_owners
+                    .lock()
+                    .expect("session owner mutex poisoned")
+                    .remove(&record.session_id);
             }
             return;
         }
@@ -691,6 +802,10 @@ async fn collect_query(
     }
     if close_session {
         sessions.close(&record.session_id).ok();
+        session_owners
+            .lock()
+            .expect("session owner mutex poisoned")
+            .remove(&record.session_id);
     }
 }
 
@@ -785,9 +900,10 @@ fn push_event(record: &QueryRecord, event: &str, value: Value, terminal: bool) {
 )]
 async fn get_query(
     State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(query_id): Path<String>,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    let record = record(&state, &query_id)?;
+    let record = record(&state, &principal, &query_id)?;
     Ok(Json(query_response(record.as_ref())))
 }
 
@@ -803,9 +919,10 @@ async fn get_query(
 )]
 async fn cancel_query(
     State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(query_id): Path<String>,
 ) -> Result<(StatusCode, Json<QueryResponse>), ApiError> {
-    let record = record(&state, &query_id)?;
+    let record = record(&state, &principal, &query_id)?;
     record.cancel.cancel();
     push_event(&record, "state", json!({ "state": "cancelling" }), false);
     Ok((StatusCode::ACCEPTED, Json(query_response(&record))))
@@ -835,11 +952,12 @@ struct ResultsQuery {
 )]
 async fn get_results(
     State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(query_id): Path<String>,
     Query(query): Query<ResultsQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let record = record(&state, &query_id)?;
+    let record = record(&state, &principal, &query_id)?;
     let (state_name, error, rows, source) = {
         let data = record.data.lock().expect("query record mutex poisoned");
         let source = match &data.storage {
@@ -939,10 +1057,11 @@ async fn get_results(
 )]
 async fn get_events(
     State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(query_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let record = record(&state, &query_id)?;
+    let record = record(&state, &principal, &query_id)?;
     let last = headers
         .get("last-event-id")
         .and_then(|value| value.to_str().ok())
@@ -993,7 +1112,6 @@ async fn get_events(
 }
 
 fn query_response(record: &QueryRecord) -> QueryResponse {
-    debug_assert_eq!(record.owner, LOCAL_OWNER);
     let data = record.data.lock().expect("query record mutex poisoned");
     QueryResponse {
         id: record.id.clone(),
@@ -1008,18 +1126,35 @@ fn query_response(record: &QueryRecord) -> QueryResponse {
     }
 }
 
-fn record(state: &AppState, id: &str) -> Result<Arc<QueryRecord>, ApiError> {
+fn record(
+    state: &AppState,
+    principal: &AuthenticatedPrincipal,
+    id: &str,
+) -> Result<Arc<QueryRecord>, ApiError> {
     cleanup_expired(state);
-    state
+    let record = state
         .records
         .lock()
         .expect("query registry mutex poisoned")
         .get(id)
-        .cloned()
+        .cloned();
+    record
+        .filter(|record| record.owner == principal.id)
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "query_not_found", "query not found"))
 }
 
-fn target(state: &AppState, name: &str) -> Result<ResolvedTarget, ApiError> {
+fn target(
+    state: &AppState,
+    principal: &AuthenticatedPrincipal,
+    name: &str,
+) -> Result<ResolvedTarget, ApiError> {
+    if !principal.can_use_target(name) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "target_forbidden",
+            format!("principal is not authorized for target '{name}'"),
+        ));
+    }
     state.config.target(name).cloned().ok_or_else(|| {
         ApiError::new(
             StatusCode::NOT_FOUND,
@@ -1027,6 +1162,80 @@ fn target(state: &AppState, name: &str) -> Result<ResolvedTarget, ApiError> {
             format!("target '{name}' does not exist"),
         )
     })
+}
+
+fn require_session_owner(
+    state: &AppState,
+    principal: &AuthenticatedPrincipal,
+    session_id: &str,
+) -> Result<(), ApiError> {
+    let owned = state
+        .session_owners
+        .lock()
+        .expect("session owner mutex poisoned")
+        .get(session_id)
+        .is_some_and(|owner| owner == &principal.id);
+    if owned {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            "session not found",
+        ))
+    }
+}
+
+fn enforce_session_quota(
+    state: &AppState,
+    principal: &AuthenticatedPrincipal,
+) -> Result<(), ApiError> {
+    let count = state
+        .session_owners
+        .lock()
+        .expect("session owner mutex poisoned")
+        .values()
+        .filter(|owner| *owner == &principal.id)
+        .count();
+    if count >= principal.max_sessions {
+        Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "session_quota",
+            "principal session quota reached",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn enforce_query_quota(
+    state: &AppState,
+    principal: &AuthenticatedPrincipal,
+) -> Result<(), ApiError> {
+    let active = state
+        .records
+        .lock()
+        .expect("query registry mutex poisoned")
+        .values()
+        .filter(|record| {
+            record.owner == principal.id
+                && record
+                    .data
+                    .lock()
+                    .expect("query record mutex poisoned")
+                    .completed_at
+                    .is_none()
+        })
+        .count();
+    if active >= principal.max_concurrent_queries {
+        Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "query_quota",
+            "principal concurrent-query quota reached",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn values(values: BTreeMap<String, Value>) -> Result<BTreeMap<String, String>, ApiError> {
@@ -1351,6 +1560,69 @@ mod tests {
             .unwrap()
     }
 
+    fn authenticated_json_request(
+        method: &str,
+        uri: &str,
+        value: &Value,
+        key: &str,
+    ) -> Request<Body> {
+        let mut request = json_request(method, uri, value);
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {key}")).unwrap(),
+        );
+        request
+    }
+
+    fn authenticated_service() -> (Router, String, String) {
+        let id = NEXT_CONFIG.fetch_add(1, Ordering::Relaxed);
+        let config_path = std::env::temp_dir().join(format!(
+            "qcli-http-auth-targets-{}-{id}.env",
+            std::process::id()
+        ));
+        std::fs::write(
+            &config_path,
+            "[demo]\nengine=demo\n\n[restricted]\nengine=demo\n",
+        )
+        .unwrap();
+        let config = Config::load(&config_path).unwrap();
+        std::fs::remove_file(config_path).ok();
+
+        let (alice_key, alice_hash) = qcli_auth::generate_api_key_material("alice-key").unwrap();
+        let (bob_key, bob_hash) = qcli_auth::generate_api_key_material("bob-key").unwrap();
+        let auth_path =
+            std::env::temp_dir().join(format!("qcli-http-auth-{}-{id}.toml", std::process::id()));
+        std::fs::write(
+            &auth_path,
+            format!(
+                "[principals.alice]\ntargets=[\"demo\"]\nmax_sessions=1\nmax_concurrent_queries=1\n\
+                 \n[principals.bob]\ntargets=[\"restricted\"]\n\
+                 \n[keys.alice-key]\nprincipal=\"alice\"\nsecret_hash={alice_hash:?}\n\
+                 \n[keys.bob-key]\nprincipal=\"bob\"\nsecret_hash={bob_hash:?}\n"
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let authenticator = qcli_auth::ApiKeyAuthenticator::load(&auth_path).unwrap();
+        std::fs::remove_file(auth_path).ok();
+        let router = HttpService::new(
+            config,
+            [Arc::new(DemoAdapter) as Arc<dyn EngineAdapter>],
+            HttpLimits::default(),
+        )
+        .with_authenticator(Arc::new(authenticator))
+        .router();
+        (
+            router,
+            alice_key.expose().to_owned(),
+            bob_key.expose().to_owned(),
+        )
+    }
+
     async fn json_body(response: Response) -> Value {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
@@ -1371,6 +1643,74 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         json_body(response).await
+    }
+
+    #[tokio::test]
+    async fn authentication_isolates_callers_and_enforces_target_acl_and_quota() {
+        let (router, alice_key, bob_key) = authenticated_service();
+        let unauthenticated = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/v1/sessions",
+                &json!({"target": "demo"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            unauthenticated.headers()[header::WWW_AUTHENTICATE],
+            "Bearer"
+        );
+
+        let created = router
+            .clone()
+            .oneshot(authenticated_json_request(
+                "POST",
+                "/v1/sessions",
+                &json!({"target": "demo"}),
+                &alice_key,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let session = json_body(created).await;
+        let session_id = session["id"].as_str().unwrap();
+
+        let hidden = router
+            .clone()
+            .oneshot(authenticated_json_request(
+                "GET",
+                &format!("/v1/sessions/{session_id}"),
+                &json!({}),
+                &bob_key,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+
+        let forbidden = router
+            .clone()
+            .oneshot(authenticated_json_request(
+                "POST",
+                "/v1/sessions",
+                &json!({"target": "demo"}),
+                &bob_key,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let quota = router
+            .oneshot(authenticated_json_request(
+                "POST",
+                "/v1/sessions",
+                &json!({"target": "demo"}),
+                &alice_key,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(quota.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     async fn wait_for_terminal(router: &Router, query_id: &str) -> Value {

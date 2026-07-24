@@ -1,3 +1,4 @@
+use qcli_auth::{ApiKeyAuthenticator, AuthenticationError, generate_api_key_material};
 use qcli_config::{Config, ConfigError, ResolvedTarget, default_config_path};
 use qcli_core::{CoreError, QueryService, SessionManager};
 use qcli_driver_api::{AdapterCapability, EngineAdapter, QueryEvent};
@@ -27,6 +28,7 @@ enum AppError {
     Output(OutputError),
     Repl(ReplError),
     Server(io::Error),
+    Authentication(AuthenticationError),
 }
 
 impl AppError {
@@ -46,6 +48,7 @@ impl AppError {
             Self::Output(_) => 7,
             Self::Repl(_) => 6,
             Self::Server(_) => 8,
+            Self::Authentication(_) => 9,
         }
     }
 
@@ -64,6 +67,7 @@ impl fmt::Display for AppError {
             Self::Output(error) => write!(f, "could not write query results: {error}"),
             Self::Repl(error) => write!(f, "interactive terminal failed: {error}"),
             Self::Server(error) => write!(f, "HTTP service failed: {error}"),
+            Self::Authentication(error) => write!(f, "authentication failed: {error}"),
         }
     }
 }
@@ -89,6 +93,12 @@ impl From<OutputError> for AppError {
 impl From<ReplError> for AppError {
     fn from(value: ReplError) -> Self {
         Self::Repl(value)
+    }
+}
+
+impl From<AuthenticationError> for AppError {
+    fn from(value: AuthenticationError) -> Self {
+        Self::Authentication(value)
     }
 }
 
@@ -176,9 +186,27 @@ async fn run(args: Vec<String>) -> Result<(), AppError> {
         [group, action, name] if group == "target" && action == "capabilities" => {
             show_capabilities(&config_path, name)
         }
-        [serve] if serve == "serve" => serve_http(&config_path, "127.0.0.1:8088").await,
+        [group, resource, action, key_id]
+            if group == "auth" && resource == "key" && action == "create" =>
+        {
+            create_api_key(key_id)
+        }
+        [serve] if serve == "serve" => serve_http(&config_path, "127.0.0.1:8088", None).await,
         [serve, bind, address] if serve == "serve" && bind == "--bind" => {
-            serve_http(&config_path, address).await
+            serve_http(&config_path, address, None).await
+        }
+        [serve, auth, auth_file] if serve == "serve" && auth == "--auth-file" => {
+            serve_http(&config_path, "127.0.0.1:8088", Some(Path::new(auth_file))).await
+        }
+        [serve, bind, address, auth, auth_file]
+            if serve == "serve" && bind == "--bind" && auth == "--auth-file" =>
+        {
+            serve_http(&config_path, address, Some(Path::new(auth_file))).await
+        }
+        [serve, auth, auth_file, bind, address]
+            if serve == "serve" && auth == "--auth-file" && bind == "--bind" =>
+        {
+            serve_http(&config_path, address, Some(Path::new(auth_file))).await
         }
         _ => Err(AppError::Usage(
             "unknown command; run qcli --help for help".into(),
@@ -186,12 +214,22 @@ async fn run(args: Vec<String>) -> Result<(), AppError> {
     }
 }
 
-async fn serve_http(path: &Path, address: &str) -> Result<(), AppError> {
+fn create_api_key(key_id: &str) -> Result<(), AppError> {
+    let (key, hash) = generate_api_key_material(key_id)?;
+    println!("API key (shown once): {}", key.expose());
+    println!("secret_hash = \"{hash}\"");
+    Ok(())
+}
+
+async fn serve_http(path: &Path, address: &str, auth_file: Option<&Path>) -> Result<(), AppError> {
     let address = address.parse().map_err(|error| {
         AppError::Usage(format!("invalid HTTP bind address '{address}': {error}"))
     })?;
     let listener = bind_local(address).await.map_err(AppError::Server)?;
-    let service = HttpService::new(Config::load(path)?, adapters(), HttpLimits::default());
+    let mut service = HttpService::new(Config::load(path)?, adapters(), HttpLimits::default());
+    if let Some(auth_file) = auth_file {
+        service = service.with_authenticator(Arc::new(ApiKeyAuthenticator::load(auth_file)?));
+    }
     eprintln!("qcli HTTP preview listening on http://{address}");
     tokio::select! {
         result = service.serve(listener) => result.map_err(AppError::Server),
@@ -468,5 +506,6 @@ fn print_help() {
     println!("  target show NAME     Show one resolved target with secrets redacted");
     println!("  target test NAME     Test target connectivity with SELECT 1");
     println!("  target capabilities NAME  Show supported engine capabilities");
-    println!("  serve [--bind 127.0.0.1:PORT]  Start the local HTTP preview");
+    println!("  auth key create ID   Generate an API key and Argon2id hash");
+    println!("  serve [--bind 127.0.0.1:PORT] [--auth-file PATH]  Start the HTTP service");
 }
