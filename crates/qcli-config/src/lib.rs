@@ -90,6 +90,13 @@ pub struct ResolvedTarget {
     pub properties: BTreeMap<String, ConfigValue>,
 }
 
+/// A target identity discovered without resolving credentials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetSummary {
+    pub name: String,
+    pub engine: String,
+}
+
 /// A validated qcli configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -123,6 +130,41 @@ impl Config {
         let parsed = parse(path, &source)?;
         validate_permissions(path, &parsed)?;
         resolve(path, parsed)
+    }
+
+    /// Discover target names and engines without expanding environment values.
+    ///
+    /// # Errors
+    ///
+    /// Returns a source-located error for I/O, syntax, permission, or target
+    /// identity validation failures. Credential placeholders are not resolved.
+    pub fn discover_targets(path: &Path) -> Result<Vec<TargetSummary>, ConfigError> {
+        let source = fs::read_to_string(path).map_err(|error| {
+            ConfigError::file(path, format!("cannot read configuration: {error}"))
+        })?;
+        let mut parsed = parse(path, &source)?;
+        validate_permissions(path, &parsed)?;
+        parsed.remove(DEFAULT_SECTION);
+
+        let mut targets = Vec::with_capacity(parsed.len());
+        for (name, properties) in parsed {
+            if properties.is_empty() {
+                return Err(ConfigError::file(
+                    path,
+                    format!("target section [{name}] cannot be empty"),
+                ));
+            }
+            let engine_value = properties.get("engine").ok_or_else(|| {
+                ConfigError::file(path, format!("target [{name}] must define 'engine'"))
+            })?;
+            let engine = engine_value.value.to_ascii_lowercase();
+            validate_engine(path, engine_value.line, &engine)?;
+            targets.push(TargetSummary { name, engine });
+        }
+        if targets.is_empty() {
+            return Err(ConfigError::file(path, "configuration defines no targets"));
+        }
+        Ok(targets)
     }
 
     #[must_use]
@@ -275,7 +317,7 @@ fn parse_value(path: &Path, line: usize, raw: &str) -> Result<String, ConfigErro
     } else {
         raw
     };
-    expand_environment(path, line, value)
+    Ok(value.to_owned())
 }
 
 fn expand_environment(path: &Path, line: usize, value: &str) -> Result<String, ConfigError> {
@@ -356,7 +398,8 @@ fn resolve(path: &Path, mut parsed: ParsedSections) -> Result<Config, ConfigErro
         let engine_value = raw_properties.get("engine").ok_or_else(|| {
             ConfigError::file(path, format!("target [{name}] must define 'engine'"))
         })?;
-        let engine = engine_value.value.to_ascii_lowercase();
+        let engine =
+            expand_environment(path, engine_value.line, &engine_value.value)?.to_ascii_lowercase();
         validate_engine(path, engine_value.line, &engine)?;
         let target_values = validate_properties(path, &name, &raw_properties, Some(&engine))?;
         let mut properties = defaults.clone();
@@ -412,11 +455,12 @@ fn validate_properties(
                 format!("unknown property '{name}' in [{section}]{suggestion}"),
             ));
         }
-        validate_typed_value(path, parsed.line, name, &parsed.value)?;
+        let value = expand_environment(path, parsed.line, &parsed.value)?;
+        validate_typed_value(path, parsed.line, name, &value)?;
         result.insert(
             name.clone(),
             ConfigValue {
-                value: parsed.value.clone(),
+                value,
                 secret: is_secret(name),
             },
         );

@@ -82,6 +82,28 @@ fn milestone_one_commands_resolve_and_redact_targets() {
 }
 
 #[test]
+fn target_list_does_not_require_credentials() {
+    let path = config_file(
+        "[databricks-dev]\nengine=databricks\nhost=https://dbc.test\ntoken=${QCLI_MISSING_DATABRICKS_TOKEN}\n",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_qcli"))
+        .arg("--config")
+        .arg(&path)
+        .args(["target", "list"])
+        .env_remove("QCLI_MISSING_DATABRICKS_TOKEN")
+        .output()
+        .expect("run qcli");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "databricks-dev           databricks\n"
+    );
+    assert!(output.stderr.is_empty());
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn invalid_value_returns_configuration_exit_code_and_location() {
     let path = config_file("[trino]\nengine=trino\ndecimal_places=many\n");
     let output = qcli(&path, &["config", "check"]);

@@ -155,8 +155,7 @@ async fn run(args: Vec<String>) -> Result<(), AppError> {
             Ok(())
         }
         [group, action] if group == "target" && action == "list" => {
-            let config = Config::load(&config_path)?;
-            for target in config.targets() {
+            for target in Config::discover_targets(&config_path)? {
                 println!("{:<24} {}", target.name, target.engine);
             }
             Ok(())
