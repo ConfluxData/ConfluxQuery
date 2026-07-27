@@ -56,8 +56,9 @@ curl -H 'Authorization: Bearer qcli_k1_...' \
 
 Keys may optionally set an RFC 3339 `expires_at`. Authenticated mode enforces
 principal ownership, target allowlists, session quotas, and concurrent-query
-quotas. It remains loopback-only until the remaining M11 network controls are
-implemented.
+quotas. Non-loopback operation additionally requires `--trusted-proxy`; see the
+[Milestone 11 notes](docs/milestones/milestone-11-notes.md) for proxy TLS,
+CORS, audit, expiry, and shutdown requirements.
 
 The versioned API creates persistent sessions, submits asynchronous session or
 stateless queries, reports status, streams SSE events, cancels work, and returns

@@ -6,7 +6,7 @@ use qcli_driver_databricks::DatabricksAdapter;
 use qcli_driver_demo::DemoAdapter;
 use qcli_driver_snowflake::SnowflakeAdapter;
 use qcli_driver_trino::TrinoAdapter;
-use qcli_http::{HttpLimits, HttpService, bind_local};
+use qcli_http::{HttpLimits, HttpOperations, HttpService, bind_http, stderr_audit_sink};
 use qcli_output::{DisplayOptions, OutputError, OutputFormat, StreamOutput};
 use qcli_repl::ReplError;
 use std::env;
@@ -143,6 +143,9 @@ async fn run(args: Vec<String>) -> Result<(), AppError> {
             .await
             .map_err(Into::into);
     }
+    if command.first().is_some_and(|value| value == "serve") {
+        return serve_http(&config_path, parse_serve_args(&command[1..])?).await;
+    }
     match command.as_slice() {
         [help] if help == "--help" || help == "-h" => {
             print_help();
@@ -191,23 +194,6 @@ async fn run(args: Vec<String>) -> Result<(), AppError> {
         {
             create_api_key(key_id)
         }
-        [serve] if serve == "serve" => serve_http(&config_path, "127.0.0.1:8088", None).await,
-        [serve, bind, address] if serve == "serve" && bind == "--bind" => {
-            serve_http(&config_path, address, None).await
-        }
-        [serve, auth, auth_file] if serve == "serve" && auth == "--auth-file" => {
-            serve_http(&config_path, "127.0.0.1:8088", Some(Path::new(auth_file))).await
-        }
-        [serve, bind, address, auth, auth_file]
-            if serve == "serve" && bind == "--bind" && auth == "--auth-file" =>
-        {
-            serve_http(&config_path, address, Some(Path::new(auth_file))).await
-        }
-        [serve, auth, auth_file, bind, address]
-            if serve == "serve" && auth == "--auth-file" && bind == "--bind" =>
-        {
-            serve_http(&config_path, address, Some(Path::new(auth_file))).await
-        }
         _ => Err(AppError::Usage(
             "unknown command; run qcli --help for help".into(),
         )),
@@ -221,20 +207,78 @@ fn create_api_key(key_id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-async fn serve_http(path: &Path, address: &str, auth_file: Option<&Path>) -> Result<(), AppError> {
-    let address = address.parse().map_err(|error| {
-        AppError::Usage(format!("invalid HTTP bind address '{address}': {error}"))
+struct ServeArguments {
+    address: String,
+    auth_file: Option<PathBuf>,
+    trusted_proxy: bool,
+    allowed_origins: Vec<String>,
+}
+
+fn parse_serve_args(arguments: &[String]) -> Result<ServeArguments, AppError> {
+    let mut result = ServeArguments {
+        address: "127.0.0.1:8088".into(),
+        auth_file: None,
+        trusted_proxy: false,
+        allowed_origins: Vec::new(),
+    };
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--trusted-proxy" if !result.trusted_proxy => {
+                result.trusted_proxy = true;
+                index += 1;
+            }
+            "--bind" | "--auth-file" | "--cors-origin" => {
+                let flag = &arguments[index];
+                let value = arguments
+                    .get(index + 1)
+                    .ok_or_else(|| AppError::Usage(format!("{flag} requires a value")))?;
+                match flag.as_str() {
+                    "--bind" => result.address.clone_from(value),
+                    "--auth-file" => result.auth_file = Some(PathBuf::from(value)),
+                    "--cors-origin" => result.allowed_origins.push(value.clone()),
+                    _ => unreachable!(),
+                }
+                index += 2;
+            }
+            flag => return Err(AppError::Usage(format!("unknown serve option '{flag}'"))),
+        }
+    }
+    Ok(result)
+}
+
+async fn serve_http(path: &Path, arguments: ServeArguments) -> Result<(), AppError> {
+    let address = arguments.address.parse().map_err(|error| {
+        AppError::Usage(format!(
+            "invalid HTTP bind address '{}': {error}",
+            arguments.address
+        ))
     })?;
-    let listener = bind_local(address).await.map_err(AppError::Server)?;
+    let authenticator = arguments
+        .auth_file
+        .as_deref()
+        .map(ApiKeyAuthenticator::load)
+        .transpose()?;
+    let listener = bind_http(address, arguments.trusted_proxy, authenticator.is_some())
+        .await
+        .map_err(AppError::Server)?;
     let mut service = HttpService::new(Config::load(path)?, adapters(), HttpLimits::default());
-    if let Some(auth_file) = auth_file {
-        service = service.with_authenticator(Arc::new(ApiKeyAuthenticator::load(auth_file)?));
+    if let Some(authenticator) = authenticator {
+        service = service
+            .with_authenticator(Arc::new(authenticator))
+            .with_audit_sink(stderr_audit_sink());
     }
-    eprintln!("qcli HTTP preview listening on http://{address}");
-    tokio::select! {
-        result = service.serve(listener) => result.map_err(AppError::Server),
-        result = tokio::signal::ctrl_c() => result.map_err(AppError::Server),
-    }
+    service = service.with_operations(HttpOperations {
+        trusted_proxy: arguments.trusted_proxy,
+        allowed_origins: arguments.allowed_origins,
+    });
+    eprintln!("qcli HTTP service listening on http://{address}");
+    service
+        .serve_with_shutdown(listener, async {
+            tokio::signal::ctrl_c().await.ok();
+        })
+        .await
+        .map_err(AppError::Server)
 }
 
 struct QueryArguments {
@@ -507,5 +551,7 @@ fn print_help() {
     println!("  target test NAME     Test target connectivity with SELECT 1");
     println!("  target capabilities NAME  Show supported engine capabilities");
     println!("  auth key create ID   Generate an API key and Argon2id hash");
-    println!("  serve [--bind 127.0.0.1:PORT] [--auth-file PATH]  Start the HTTP service");
+    println!(
+        "  serve [--bind ADDRESS] [--auth-file PATH] [--trusted-proxy] [--cors-origin ORIGIN]"
+    );
 }

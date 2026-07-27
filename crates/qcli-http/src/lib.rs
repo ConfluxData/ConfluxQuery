@@ -5,7 +5,7 @@ use arrow_ipc::reader::FileReader;
 use arrow_ipc::writer::{FileWriter, StreamWriter};
 use axum::body::Body;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -22,9 +22,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
+use std::future::Future;
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -44,6 +46,9 @@ pub struct HttpLimits {
     pub default_page_rows: usize,
     pub max_page_rows: usize,
     pub max_sql_bytes: usize,
+    pub session_ttl: Duration,
+    pub cleanup_interval: Duration,
+    pub shutdown_grace: Duration,
 }
 
 impl Default for HttpLimits {
@@ -56,20 +61,75 @@ impl Default for HttpLimits {
             default_page_rows: 1_000,
             max_page_rows: 10_000,
             max_sql_bytes: 1024 * 1024,
+            session_ttl: Duration::from_secs(30 * 60),
+            cleanup_interval: Duration::from_secs(30),
+            shutdown_grace: Duration::from_secs(10),
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HttpOperations {
+    pub trusted_proxy: bool,
+    pub allowed_origins: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AuditEvent {
+    pub action: String,
+    pub outcome: String,
+    pub principal: Option<String>,
+    pub target: Option<String>,
+    pub session_id: Option<String>,
+    pub query_id: Option<String>,
+}
+
+pub trait AuditSink: Send + Sync {
+    fn record(&self, event: &AuditEvent);
+}
+
+#[derive(Debug)]
+struct NullAuditSink;
+
+impl AuditSink for NullAuditSink {
+    fn record(&self, _event: &AuditEvent) {}
+}
+
+#[derive(Debug)]
+struct StderrAuditSink;
+
+impl AuditSink for StderrAuditSink {
+    fn record(&self, event: &AuditEvent) {
+        if let Ok(value) = serde_json::to_string(event) {
+            eprintln!("qcli_audit {value}");
+        }
+    }
+}
+
+#[must_use]
+pub fn stderr_audit_sink() -> Arc<dyn AuditSink> {
+    Arc::new(StderrAuditSink)
+}
+
+#[derive(Debug, Clone)]
+struct SessionOwner {
+    principal: String,
+    last_access: Instant,
 }
 
 #[derive(Clone)]
 struct AppState {
     config: Arc<Config>,
     sessions: Arc<SessionManager>,
-    session_owners: Arc<Mutex<HashMap<String, String>>>,
+    session_owners: Arc<Mutex<HashMap<String, SessionOwner>>>,
     queries: Arc<QueryService>,
     records: Arc<Mutex<HashMap<String, Arc<QueryRecord>>>>,
     limits: HttpLimits,
     page_secret: u64,
     authenticator: Option<Arc<dyn Authenticator>>,
+    operations: HttpOperations,
+    audit: Arc<dyn AuditSink>,
+    shutting_down: Arc<AtomicBool>,
 }
 
 struct QueryRecord {
@@ -194,6 +254,9 @@ impl HttpService {
                 limits,
                 page_secret,
                 authenticator: None,
+                operations: HttpOperations::default(),
+                audit: Arc::new(NullAuditSink),
+                shutting_down: Arc::new(AtomicBool::new(false)),
             },
         }
     }
@@ -201,6 +264,18 @@ impl HttpService {
     #[must_use]
     pub fn with_authenticator(mut self, authenticator: Arc<dyn Authenticator>) -> Self {
         self.state.authenticator = Some(authenticator);
+        self
+    }
+
+    #[must_use]
+    pub fn with_operations(mut self, operations: HttpOperations) -> Self {
+        self.state.operations = operations;
+        self
+    }
+
+    #[must_use]
+    pub fn with_audit_sink(mut self, audit: Arc<dyn AuditSink>) -> Self {
+        self.state.audit = audit;
         self
     }
 
@@ -235,6 +310,10 @@ impl HttpService {
             .route_layer(middleware::from_fn_with_state(
                 self.state.clone(),
                 authenticate_request,
+            ))
+            .route_layer(middleware::from_fn_with_state(
+                self.state.clone(),
+                enforce_http_operations,
             ));
         api.merge(SwaggerUi::new("/docs").url("/openapi.json", openapi))
             .with_state(self.state.clone())
@@ -246,8 +325,141 @@ impl HttpService {
     ///
     /// Returns an I/O error from accepting or serving a connection.
     pub async fn serve(self, listener: TcpListener) -> std::io::Result<()> {
-        axum::serve(listener, self.router()).await
+        self.serve_with_shutdown(listener, std::future::pending::<()>())
+            .await
     }
+
+    /// Serve with periodic cleanup and cancellation of active work on shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error from accepting or serving a connection.
+    pub async fn serve_with_shutdown(
+        self,
+        listener: TcpListener,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> std::io::Result<()> {
+        let state = self.state.clone();
+        let cleanup_state = state.clone();
+        let cleanup = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(cleanup_state.limits.cleanup_interval);
+            loop {
+                interval.tick().await;
+                if cleanup_state.shutting_down.load(Ordering::Acquire) {
+                    return;
+                }
+                cleanup_expired(&cleanup_state);
+            }
+        });
+        let shutdown_state = state.clone();
+        let signal = async move {
+            shutdown.await;
+            shutdown_state.shutting_down.store(true, Ordering::Release);
+            cancel_active_queries(&shutdown_state);
+        };
+        let result = axum::serve(listener, self.router())
+            .with_graceful_shutdown(signal)
+            .await;
+        cleanup.abort();
+        wait_for_queries(&state).await;
+        result
+    }
+}
+
+async fn enforce_http_operations(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    if state.shutting_down.load(Ordering::Acquire) {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shutting_down",
+            "server is shutting down",
+        ));
+    }
+    let headers = request.headers();
+    let forwarded = headers.contains_key("forwarded")
+        || headers.contains_key("x-forwarded-for")
+        || headers.contains_key("x-forwarded-host")
+        || headers.contains_key("x-forwarded-proto");
+    if forwarded && !state.operations.trusted_proxy {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "untrusted_forwarded_headers",
+            "forwarded headers require trusted-proxy mode",
+        ));
+    }
+    if state.operations.trusted_proxy
+        && headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            != Some("https")
+    {
+        return Err(ApiError::new(
+            StatusCode::UPGRADE_REQUIRED,
+            "https_required",
+            "trusted proxy must report x-forwarded-proto: https",
+        ));
+    }
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    if let Some(origin) = &origin
+        && !state
+            .operations
+            .allowed_origins
+            .iter()
+            .any(|item| item == origin)
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "origin_forbidden",
+            "request origin is not allowed",
+        ));
+    }
+    if request.method() == Method::OPTIONS
+        && request
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_REQUEST_METHOD)
+    {
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        if let Some(origin) = origin {
+            add_cors_headers(&mut response, &origin)?;
+            response.headers_mut().insert(
+                header::ACCESS_CONTROL_ALLOW_METHODS,
+                HeaderValue::from_static("GET, POST, PATCH, DELETE, OPTIONS"),
+            );
+            response.headers_mut().insert(
+                header::ACCESS_CONTROL_ALLOW_HEADERS,
+                HeaderValue::from_static("Authorization, Content-Type, Last-Event-ID"),
+            );
+        }
+        return Ok(response);
+    }
+    let mut response = next.run(request).await;
+    if let Some(origin) = origin {
+        add_cors_headers(&mut response, &origin)?;
+    }
+    Ok(response)
+}
+
+fn add_cors_headers(response: &mut Response, origin: &str) -> Result<(), ApiError> {
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_str(origin).map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cors",
+                "configured origin is not a valid header value",
+            )
+        })?,
+    );
+    response
+        .headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("Origin"));
+    Ok(())
 }
 
 async fn authenticate_request(
@@ -260,22 +472,47 @@ async fn authenticate_request(
             .headers()
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::UNAUTHORIZED,
-                    "authentication_required",
-                    "a bearer credential is required",
-                )
-            })?;
-        authenticator.authenticate(bearer).await.map_err(|error| {
-            let status = if error.kind == AuthenticationErrorKind::Configuration {
-                StatusCode::INTERNAL_SERVER_ERROR
-            } else {
-                StatusCode::UNAUTHORIZED
-            };
-            ApiError::new(status, "authentication_failed", error.message)
-        })?
+            .and_then(|value| value.strip_prefix("Bearer "));
+        let Some(bearer) = bearer else {
+            audit(
+                &state,
+                "request.authenticate",
+                "denied",
+                None,
+                None,
+                None,
+                None,
+            );
+            return Err(ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "authentication_required",
+                "a bearer credential is required",
+            ));
+        };
+        match authenticator.authenticate(bearer).await {
+            Ok(principal) => principal,
+            Err(error) => {
+                audit(
+                    &state,
+                    "request.authenticate",
+                    "denied",
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+                let status = if error.kind == AuthenticationErrorKind::Configuration {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                } else {
+                    StatusCode::UNAUTHORIZED
+                };
+                return Err(ApiError::new(
+                    status,
+                    "authentication_failed",
+                    error.message,
+                ));
+            }
+        }
     } else {
         AuthenticatedPrincipal {
             id: "local".into(),
@@ -284,6 +521,15 @@ async fn authenticate_request(
             max_concurrent_queries: usize::MAX,
         }
     };
+    audit(
+        &state,
+        "request.authenticate",
+        "allowed",
+        Some(&principal),
+        None,
+        None,
+        None,
+    );
     request.extensions_mut().insert(principal);
     Ok(next.run(request).await)
 }
@@ -449,7 +695,22 @@ async fn create_session(
         .session_owners
         .lock()
         .expect("session owner mutex poisoned")
-        .insert(snapshot.id.clone(), principal.id);
+        .insert(
+            snapshot.id.clone(),
+            SessionOwner {
+                principal: principal.id.clone(),
+                last_access: Instant::now(),
+            },
+        );
+    audit(
+        &state,
+        "session.create",
+        "allowed",
+        Some(&principal),
+        Some(&snapshot.target),
+        Some(&snapshot.id),
+        None,
+    );
     Ok((StatusCode::CREATED, Json(snapshot.into())))
 }
 
@@ -588,6 +849,15 @@ async fn delete_session(
         .lock()
         .expect("session owner mutex poisoned")
         .remove(&session_id);
+    audit(
+        &state,
+        "session.delete",
+        "allowed",
+        Some(&principal),
+        None,
+        Some(&session_id),
+        None,
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -643,7 +913,13 @@ async fn submit_stateless_query(
         .session_owners
         .lock()
         .expect("session owner mutex poisoned")
-        .insert(snapshot.id.clone(), principal.id.clone());
+        .insert(
+            snapshot.id.clone(),
+            SessionOwner {
+                principal: principal.id.clone(),
+                last_access: Instant::now(),
+            },
+        );
     submit_query(&state, &principal, &snapshot, request.sql, true)
 }
 
@@ -706,6 +982,15 @@ fn submit_query(
         .lock()
         .expect("query registry mutex poisoned")
         .insert(id, record.clone());
+    audit(
+        state,
+        "query.submit",
+        "allowed",
+        Some(principal),
+        Some(&snapshot.target),
+        Some(&snapshot.id),
+        Some(&record.id),
+    );
     let response = query_response(&record);
     tokio::spawn(collect_query(
         state.sessions.clone(),
@@ -720,7 +1005,7 @@ fn submit_query(
 
 async fn collect_query(
     sessions: Arc<SessionManager>,
-    session_owners: Arc<Mutex<HashMap<String, String>>>,
+    session_owners: Arc<Mutex<HashMap<String, SessionOwner>>>,
     record: Arc<QueryRecord>,
     mut handle: qcli_core::QueryHandle,
     limits: HttpLimits,
@@ -924,6 +1209,15 @@ async fn cancel_query(
 ) -> Result<(StatusCode, Json<QueryResponse>), ApiError> {
     let record = record(&state, &principal, &query_id)?;
     record.cancel.cancel();
+    audit(
+        &state,
+        "query.cancel",
+        "allowed",
+        Some(&principal),
+        Some(&record.target),
+        Some(&record.session_id),
+        Some(&record.id),
+    );
     push_event(&record, "state", json!({ "state": "cancelling" }), false);
     Ok((StatusCode::ACCEPTED, Json(query_response(&record))))
 }
@@ -1149,6 +1443,15 @@ fn target(
     name: &str,
 ) -> Result<ResolvedTarget, ApiError> {
     if !principal.can_use_target(name) {
+        audit(
+            state,
+            "target.authorize",
+            "denied",
+            Some(principal),
+            Some(name),
+            None,
+            None,
+        );
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "target_forbidden",
@@ -1173,8 +1476,15 @@ fn require_session_owner(
         .session_owners
         .lock()
         .expect("session owner mutex poisoned")
-        .get(session_id)
-        .is_some_and(|owner| owner == &principal.id);
+        .get_mut(session_id)
+        .is_some_and(|owner| {
+            if owner.principal == principal.id {
+                owner.last_access = Instant::now();
+                true
+            } else {
+                false
+            }
+        });
     if owned {
         Ok(())
     } else {
@@ -1195,7 +1505,7 @@ fn enforce_session_quota(
         .lock()
         .expect("session owner mutex poisoned")
         .values()
-        .filter(|owner| *owner == &principal.id)
+        .filter(|owner| owner.principal == principal.id)
         .count();
     if count >= principal.max_sessions {
         Err(ApiError::new(
@@ -1418,6 +1728,99 @@ fn cleanup_expired(state: &AppState) {
                 .completed_at
                 .is_none_or(|completed| now.duration_since(completed) < state.limits.result_ttl)
         });
+    let expired_sessions = {
+        let owners = state
+            .session_owners
+            .lock()
+            .expect("session owner mutex poisoned");
+        owners
+            .iter()
+            .filter(|(_, owner)| now.duration_since(owner.last_access) >= state.limits.session_ttl)
+            .map(|(id, owner)| (id.clone(), owner.principal.clone()))
+            .collect::<Vec<_>>()
+    };
+    for (session_id, principal) in expired_sessions {
+        state
+            .records
+            .lock()
+            .expect("query registry mutex poisoned")
+            .values()
+            .filter(|record| record.session_id == session_id)
+            .for_each(|record| record.cancel.cancel());
+        state.sessions.close(&session_id).ok();
+        state
+            .session_owners
+            .lock()
+            .expect("session owner mutex poisoned")
+            .remove(&session_id);
+        state.audit.record(&AuditEvent {
+            action: "session.expire".into(),
+            outcome: "cancelled_active_queries".into(),
+            principal: Some(principal),
+            target: None,
+            session_id: Some(session_id),
+            query_id: None,
+        });
+    }
+}
+
+fn cancel_active_queries(state: &AppState) {
+    state
+        .records
+        .lock()
+        .expect("query registry mutex poisoned")
+        .values()
+        .filter(|record| {
+            record
+                .data
+                .lock()
+                .expect("query record mutex poisoned")
+                .completed_at
+                .is_none()
+        })
+        .for_each(|record| record.cancel.cancel());
+}
+
+async fn wait_for_queries(state: &AppState) {
+    let deadline = tokio::time::Instant::now() + state.limits.shutdown_grace;
+    loop {
+        let active = state
+            .records
+            .lock()
+            .expect("query registry mutex poisoned")
+            .values()
+            .any(|record| {
+                record
+                    .data
+                    .lock()
+                    .expect("query record mutex poisoned")
+                    .completed_at
+                    .is_none()
+            });
+        if !active || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn audit(
+    state: &AppState,
+    action: &str,
+    outcome: &str,
+    principal: Option<&AuthenticatedPrincipal>,
+    target: Option<&str>,
+    session_id: Option<&str>,
+    query_id: Option<&str>,
+) {
+    state.audit.record(&AuditEvent {
+        action: action.into(),
+        outcome: outcome.into(),
+        principal: principal.map(|value| value.id.clone()),
+        target: target.map(str::to_owned),
+        session_id: session_id.map(str::to_owned),
+        query_id: query_id.map(str::to_owned),
+    });
 }
 
 fn slice_batches(batches: &[RecordBatch], start: usize, end: usize) -> Vec<RecordBatch> {
@@ -1518,10 +1921,26 @@ fn invalid_page_token() -> ApiError {
 ///
 /// Returns an error when the address is not loopback or cannot be bound.
 pub async fn bind_local(address: SocketAddr) -> std::io::Result<TcpListener> {
-    if !address.ip().is_loopback() {
+    bind_http(address, false, false).await
+}
+
+/// Bind according to the production exposure policy.
+///
+/// Non-loopback binding requires both authenticated mode and an explicit
+/// trusted TLS-terminating proxy declaration.
+///
+/// # Errors
+///
+/// Returns an error when exposure is unsafe or the address cannot be bound.
+pub async fn bind_http(
+    address: SocketAddr,
+    trusted_proxy: bool,
+    authenticated: bool,
+) -> std::io::Result<TcpListener> {
+    if !(address.ip().is_loopback() || trusted_proxy && authenticated) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "M10 preview refuses non-loopback binding",
+            "non-loopback binding requires --auth-file and --trusted-proxy",
         ));
     }
     TcpListener::bind(address).await
@@ -1537,6 +1956,15 @@ mod tests {
     use tower::ServiceExt;
 
     static NEXT_CONFIG: AtomicU64 = AtomicU64::new(1);
+
+    #[derive(Default)]
+    struct MemoryAuditSink(Mutex<Vec<AuditEvent>>);
+
+    impl AuditSink for MemoryAuditSink {
+        fn record(&self, event: &AuditEvent) {
+            self.0.lock().unwrap().push(event.clone());
+        }
+    }
 
     fn service(limits: HttpLimits) -> HttpService {
         let id = NEXT_CONFIG.fetch_add(1, Ordering::Relaxed);
@@ -2116,6 +2544,135 @@ mod tests {
     async fn preview_refuses_non_loopback_binding() {
         let error = bind_local("0.0.0.0:0".parse().unwrap()).await.unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        let error = bind_http("0.0.0.0:0".parse().unwrap(), true, false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        let listener = bind_http("0.0.0.0:0".parse().unwrap(), true, true)
+            .await
+            .unwrap();
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn forwarded_headers_and_cors_are_fail_closed() {
+        let router = service(HttpLimits::default())
+            .with_operations(HttpOperations {
+                trusted_proxy: false,
+                allowed_origins: vec!["https://console.example".into()],
+            })
+            .router();
+        let forwarded = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/sessions/missing")
+                    .header("x-forwarded-proto", "https")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forwarded.status(), StatusCode::BAD_REQUEST);
+
+        let forbidden_origin = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/sessions/missing")
+                    .header(header::ORIGIN, "https://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forbidden_origin.status(), StatusCode::FORBIDDEN);
+
+        let preflight = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/v1/sessions")
+                    .header(header::ORIGIN, "https://console.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(preflight.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            preflight.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://console.example"
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_proxy_requires_forwarded_https() {
+        let router = service(HttpLimits::default())
+            .with_operations(HttpOperations {
+                trusted_proxy: true,
+                allowed_origins: Vec::new(),
+            })
+            .router();
+        let direct = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/sessions/missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(direct.status(), StatusCode::UPGRADE_REQUIRED);
+        let proxied = router
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/sessions/missing")
+                    .header("x-forwarded-proto", "https")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(proxied.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn cleanup_expires_sessions_and_audit_omits_sql() {
+        let limits = HttpLimits {
+            session_ttl: Duration::from_secs(60),
+            ..HttpLimits::default()
+        };
+        let audit = Arc::new(MemoryAuditSink::default());
+        let service = service(limits).with_audit_sink(audit.clone());
+        let router = service.router();
+        let session = create_demo_session(&router).await;
+        let session_id = session["id"].as_str().unwrap();
+        let response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/v1/sessions/{session_id}/queries"),
+                &json!({ "sql": "select 'never-audit-this-sql'" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        service
+            .state
+            .session_owners
+            .lock()
+            .unwrap()
+            .get_mut(session_id)
+            .unwrap()
+            .last_access = Instant::now().checked_sub(Duration::from_secs(61)).unwrap();
+        cleanup_expired(&service.state);
+        assert!(service.state.sessions.snapshot(session_id).is_err());
+        let encoded = serde_json::to_string(&*audit.0.lock().unwrap()).unwrap();
+        assert!(encoded.contains("query.submit"));
+        assert!(!encoded.contains("never-audit-this-sql"));
     }
 
     #[tokio::test]
