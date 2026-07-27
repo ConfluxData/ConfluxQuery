@@ -11,7 +11,7 @@ arrow-array.workspace = true
 arrow-json.workspace = true
 arrow-schema.workspace = true
 async-trait.workspace = true
-qcli-driver-api = { path = "../qcli-driver-api" }
+qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

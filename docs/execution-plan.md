@@ -346,7 +346,7 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 | M9 — Unified release candidate | Complete | Run consistent workflows across all three engines |
 | M10 — Local HTTP query service | Complete | Manage sessions and queries over localhost HTTP |
 | M11 — Production HTTP service | Complete | Secure multi-user HTTP operation with bounded resources |
-| M12 — Packaged release | Pending | Install and run signed cross-platform artifacts |
+| M12 — Packaged release | In progress | Install and run signed cross-platform artifacts |
 
 Allowed status values are `Pending`, `In progress`, `Blocked`, and `Complete`. A milestone becomes `Complete` only after its automated tests, live or deterministic demo, documentation, and milestone report are present.
 

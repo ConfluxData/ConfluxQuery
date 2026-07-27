@@ -1,0 +1,81 @@
+name: Publish packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Stable release tag already published on GitHub
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify stable published release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - id: version
+        shell: bash
+        run: |
+          [[ "${{ inputs.tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version="${{ inputs.tag }}"
+          version="${version#v}"
+          [[ "$(sed -n 's/^version = \"\\([^\"]*\\)\"/\\1/p' Cargo.toml | head -1)" == "$version" ]]
+          gh release view "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  crates-io:
+    name: Publish crates.io
+    if: vars.ENABLE_CRATES_IO_PUBLISH == 'true'
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish workspace crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: bash scripts/publish-crates.sh
+
+  homebrew:
+    name: Update Homebrew tap
+    if: vars.HOMEBREW_TAP != ''
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: homebrew
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate formula from release checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: bash scripts/generate-homebrew-formula.sh "$TAG" "$GITHUB_REPOSITORY" > qcli.rb
+      - name: Publish formula to tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP: ${{ vars.HOMEBREW_TAP }}
+        shell: bash
+        run: |
+          gh repo clone "$TAP" tap
+          mkdir -p tap/Formula
+          cp qcli.rb tap/Formula/qcli.rb
+          cd tap
+          git config user.name "qcli-release"
+          git config user.email "qcli-release@users.noreply.github.com"
+          git add Formula/qcli.rb
+          git commit -m "qcli ${{ inputs.tag }}"
+          git push

@@ -7,11 +7,11 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
-qcli-config = { path = "../qcli-config" }
-qcli-core = { path = "../qcli-core" }
-qcli-driver-api = { path = "../qcli-driver-api" }
-qcli-metadata = { path = "../qcli-metadata" }
-qcli-output = { path = "../qcli-output" }
+qcli-config = { version = "0.1.0", path = "../qcli-config" }
+qcli-core = { version = "0.1.0", path = "../qcli-core" }
+qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
+qcli-metadata = { version = "0.1.0", path = "../qcli-metadata" }
+qcli-output = { version = "0.1.0", path = "../qcli-output" }
 rustyline.workspace = true
 signal-hook.workspace = true
 tokio.workspace = true

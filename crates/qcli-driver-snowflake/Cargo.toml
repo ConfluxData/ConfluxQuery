@@ -11,8 +11,8 @@ arrow-array.workspace = true
 arrow-schema.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
-qcli-auth = { path = "../qcli-auth" }
-qcli-driver-api = { path = "../qcli-driver-api" }
+qcli-auth = { version = "0.1.0", path = "../qcli-auth" }
+qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
 snowflakedb-rs.workspace = true
 
 [lints]

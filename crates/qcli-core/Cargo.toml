@@ -9,13 +9,13 @@ version.workspace = true
 [dependencies]
 arrow-array.workspace = true
 chrono.workspace = true
-qcli-config = { path = "../qcli-config" }
-qcli-driver-api = { path = "../qcli-driver-api" }
+qcli-config = { version = "0.1.0", path = "../qcli-config" }
+qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
 tokio.workspace = true
 
 [dev-dependencies]
-qcli-driver-demo = { path = "../qcli-driver-demo" }
-qcli-output = { path = "../qcli-output" }
+qcli-driver-demo = { version = "0.1.0", path = "../qcli-driver-demo" }
+qcli-output = { version = "0.1.0", path = "../qcli-output" }
 
 [lints]
 workspace = true

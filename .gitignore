@@ -11,6 +11,7 @@
 *.profraw
 *.profdata
 /coverage/
+/dist/
 
 # Operating-system and editor debris.
 .DS_Store

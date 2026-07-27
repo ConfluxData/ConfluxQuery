@@ -9,6 +9,8 @@ Architecture and delivery documentation:
 - [Extensible authentication providers](docs/adr-003-extensible-authentication.md)
 - [Databricks and Snowflake Rust client selection](docs/adr-004-databricks-snowflake-clients.md)
 - [HTTP caller authentication](docs/adr-005-http-caller-authentication.md)
+- [Release and branching guide](docs/releasing.md)
+- [Supported platforms and engines](docs/supported-platforms.md)
 
 Inspect an engine's normalized capabilities without connecting:
 

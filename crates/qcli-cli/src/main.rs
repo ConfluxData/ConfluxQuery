@@ -147,6 +147,10 @@ async fn run(args: Vec<String>) -> Result<(), AppError> {
         return serve_http(&config_path, parse_serve_args(&command[1..])?).await;
     }
     match command.as_slice() {
+        [version] if version == "--version" || version == "-V" => {
+            println!("qcli {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         [help] if help == "--help" || help == "-h" => {
             print_help();
             Ok(())
@@ -543,6 +547,7 @@ fn print_help() {
     );
     println!("Formats: table, vertical, csv, tsv, json, jsonl\n");
     println!("Commands:");
+    println!("  --version            Print qcli version");
     println!("  config path          Print the configuration path");
     println!("  config check         Validate configuration and targets");
     println!("  config show          Show resolved configuration with secrets redacted");

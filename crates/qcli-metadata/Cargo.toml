@@ -7,7 +7,7 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
-qcli-driver-api = { path = "../qcli-driver-api" }
+qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
 
 [dev-dependencies]
 async-trait.workspace = true

@@ -49,6 +49,18 @@ fn qcli_with_stdin(path: &PathBuf, arguments: &[&str], input: &str) -> std::proc
 }
 
 #[test]
+fn packaged_binary_reports_workspace_version() {
+    let path = config_file("[demo]\nengine=demo\n");
+    let output = qcli(&path, &["--version"]);
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("qcli {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn milestone_one_commands_resolve_and_redact_targets() {
     let path = config_file(
         "[default]\ndecimal_places=3\nstring_truncate=80\n\n[trino-dev]\nengine=trino\nurl=https://user:password@trino.test\ntoken=${QCLI_TEST_TOKEN}\ndecimal_places=10\n\n[databricks-dev]\nengine=databricks\nhost=https://dbc.test\nhttp_path=/sql/1.0/warehouses/abc\ntoken=${QCLI_TEST_TOKEN}\n\n[snowflake-prod]\nengine=snowflake\naccount=acme\npassword=${QCLI_TEST_TOKEN}\n",

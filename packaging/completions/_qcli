@@ -1,0 +1,11 @@
+#compdef qcli
+
+_arguments \
+  '--help[show help]' \
+  '--version[show version]' \
+  '--config[configuration file]:file:_files' \
+  '--target[target name]:target:' \
+  '--command[SQL text]:sql:' \
+  '--file[SQL file]:file:_files' \
+  '--format[result format]:(table vertical csv tsv json jsonl)' \
+  '1:command:(config target auth serve)'

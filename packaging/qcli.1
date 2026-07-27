@@ -1,0 +1,35 @@
+.TH QCLI 1 "July 2026" "qcli 0.1.0" "User Commands"
+.SH NAME
+qcli \- one query shell for cloud data platforms
+.SH SYNOPSIS
+.B qcli
+[\fB--config\fR \fIPATH\fR] [\fB--target\fR \fITARGET\fR]
+.br
+.B qcli
+[\fB--config\fR \fIPATH\fR] \fICOMMAND\fR
+.SH DESCRIPTION
+qcli executes native SQL against configured Trino, Databricks SQL, and
+Snowflake targets. Interactive, batch, and HTTP frontends share one session and
+query execution core.
+.SH COMMANDS
+.TP
+.B config path|check|show
+Inspect and validate configuration.
+.TP
+.B target list|show|test|capabilities
+Inspect targets and test connectivity.
+.TP
+.B auth key create ID
+Generate an opaque HTTP API key and Argon2id hash.
+.TP
+.B serve
+Start the HTTP service. See \fBqcli --help\fR for production options.
+.SH FILES
+.TP
+.I ~/.qcli/.env
+Default sectioned target configuration.
+.TP
+.I ~/.qcli/http-auth.toml
+Suggested HTTP caller authentication configuration.
+.SH SEE ALSO
+The qcli README and milestone documentation distributed with the source.
