@@ -12,7 +12,12 @@ Primary configuration: `~/.qcli/.env`
 
 qcli is an interactive and automation-friendly command-line query client for cloud data platforms. It provides one consistent workflow for selecting a configured target, discovering data, executing SQL, inspecting query progress, and exporting results across Trino, Databricks SQL, and Snowflake.
 
-The same execution core may also be exposed through an optional HTTP service. Terminal and HTTP clients share the same session, adapter, query lifecycle, cancellation, and result abstractions; the HTTP service must not shell out to the qcli executable.
+The same execution core is exposed through `qcli serve`. HTTP is the operational
+control plane and Arrow Flight SQL is the standard remote SQL and Arrow data
+plane. Terminal, HTTP, and Flight SQL clients share the same authentication,
+authorization, session, adapter, query lifecycle, cancellation, metadata,
+quota, audit, and result abstractions; neither service frontend may shell out to
+the qcli executable.
 
 qcli is not designed around PostgreSQL compatibility. Its common model is the model shared by analytical query platforms:
 
@@ -65,7 +70,11 @@ The name means “query command-line interface.” It avoids implying that qcli 
 - Allow future engines to be added through a stable internal adapter contract.
 - Provide strong cross-platform binaries for Linux, macOS, and Windows.
 - Expose query execution through a versioned HTTP API after the direct CLI path is stable.
-- Use one session model for terminal state and HTTP-managed state.
+- Expose a standards-compliant Arrow Flight SQL endpoint for ADBC, JDBC, ODBC,
+  and native Flight SQL clients.
+- Use one session and query model for terminal, HTTP, and Flight SQL state.
+- Keep HTTP as the control/operations API and Flight SQL as the Arrow-native SQL
+  data plane.
 
 ## 4. Non-goals for the first release
 
@@ -77,10 +86,13 @@ The name means “query command-line interface.” It avoids implying that qcli 
 - Data editing UI.
 - Query charting or terminal graphics.
 - Arbitrary third-party plugins or a stable external plugin ABI.
-- ODBC as the universal fallback.
+- A custom qcli ADBC driver while standard ADBC Flight SQL drivers can connect
+  to qcli.
+- Claiming universal JDBC or ODBC compatibility without client conformance
+  testing.
 - Complete implementation of every planned authentication mechanism on day one;
   the architecture must nevertheless support adding them without changing query,
-  session, frontend, or HTTP contracts.
+  session, frontend, HTTP, or Flight SQL contracts.
 - Normalizing every engine-specific query plan into one model.
 - Predicting query cost before execution.
 - Acting as a security boundary. Database permissions remain authoritative.
@@ -919,7 +931,9 @@ The exact codes must be frozen before a stable release.
 
 ### 18.4 Shared session model
 
-Terminal and HTTP frontends use the same logical session abstraction. A session is not necessarily one permanent physical database connection.
+Terminal, HTTP, and Flight SQL frontends use the same logical session
+abstraction. A session is not necessarily one permanent physical database
+connection.
 
 ```text
 Session
@@ -948,7 +962,10 @@ qcli built-in default
 
 An individual query override applies only to that query and never mutates the session.
 
-The terminal creates one process-local session. Commands such as `\use`, `\use-schema`, `\set-property`, and `\set` mutate that session. The HTTP service manages multiple owned, versioned, expiring sessions.
+The terminal creates one process-local session. Commands such as `\use`,
+`\use-schema`, `\set-property`, and `\set` mutate that session. In serve mode,
+HTTP and Flight SQL share multiple owned, versioned, expiring sessions through
+the protocol-neutral service layer.
 
 ### 18.5 Immutable query snapshots
 
@@ -1121,7 +1138,7 @@ The first implementation should prefer correctness and isolation over minimizing
 
 ### 18.12 Session lifetime and cleanup
 
-The initial HTTP service may keep sessions in process memory with:
+The initial single-node service may keep sessions in process memory with:
 
 - Readable session IDs in `username_YYYYMMDD_HHMM_XX` form. Session IDs are
   identifiers, not authentication credentials; caller ownership and
@@ -1173,6 +1190,178 @@ A shared bearer token is acceptable only for local development. Multi-user deplo
 
 The product must explicitly choose whether a query runs as a shared service identity, propagated caller identity, or an authorized named credential profile. Shared service identities are simplest but carry the greatest privilege-sharing risk.
 
+### 18.15 Global `qcli serve` mode
+
+`qcli serve` is one service runtime with two protocol frontends:
+
+```text
+qcli serve
+├── HTTP control plane
+│   ├── OpenAPI and Swagger
+│   ├── operational session/query APIs
+│   ├── health, readiness, metrics, and administration
+│   └── browser-oriented integration
+└── Flight SQL data plane
+    ├── SQL execution
+    ├── Arrow result streaming
+    ├── SQL metadata
+    ├── session options
+    ├── prepared statements and parameter batches
+    └── ADBC/JDBC/approved ODBC connectivity
+```
+
+The listeners normally use different ports because Flight SQL requires gRPC
+over HTTP/2. A reverse proxy may present one public hostname, but qcli does not
+depend on protocol multiplexing at one socket.
+
+Representative production startup:
+
+```text
+qcli serve \
+  --http-bind 127.0.0.1:8088 \
+  --flight-bind 0.0.0.0:32010 \
+  --auth-file ~/.qcli/http-auth.toml \
+  --tls-cert /etc/qcli/tls.crt \
+  --tls-key /etc/qcli/tls.key
+```
+
+HTTP and Flight SQL must share one protocol-neutral `qcli-service` layer.
+Neither frontend owns canonical session, query, result, quota, expiry, audit,
+or shutdown state.
+
+### 18.16 Flight SQL connectivity contract
+
+Flight SQL is qcli's standard remote SQL protocol. Standard clients connect as:
+
+```text
+ADBC Flight SQL ──┐
+Arrow JDBC ───────┼── Flight SQL/gRPC ── qcli-service ── engine adapters
+approved ODBC ────┤
+native clients ───┘
+```
+
+qcli will not initially publish a custom ADBC driver. ADBC is the client API;
+the existing ADBC Flight SQL driver supplies the protocol adapter. An arbitrary
+backend-specific ADBC driver does not connect to qcli.
+
+Compatibility levels are explicit:
+
+- Native Flight SQL and selected ADBC Flight SQL clients are primary.
+- Apache Arrow Flight SQL JDBC becomes supported after conformance testing.
+- ODBC remains experimental until a selected third-party Flight SQL ODBC driver
+  passes the qcli compatibility matrix on supported platforms.
+
+### 18.17 Flight sessions and target selection
+
+Flight SQL `SetSessionOptions`, `GetSessionOptions`, and `CloseSession` map to
+the shared qcli session model. Required portable options include:
+
+```text
+qcli.target
+catalog
+schema
+qcli.query_timeout
+qcli.session.<engine-property>
+```
+
+Authentication identifies the principal. An opaque signed session token or
+cookie identifies the principal-owned qcli session. The token never contains
+credentials, SQL, connection properties, or physical engine connection state.
+
+`qcli.target` must be authorized and selected before query execution. Target
+switching remains atomic and versioned. Flight and HTTP operations against the
+same session observe the same state and ownership rules.
+
+### 18.18 Flight query and result lifecycle
+
+Statement execution follows the standard Flight pattern:
+
+```text
+GetFlightInfo(CommandStatementQuery)
+  -> authenticate and authorize
+  -> submit shared qcli query
+  -> return schema and signed endpoint ticket
+
+DoGet(ticket)
+  -> validate version, owner, query, partition, and expiry
+  -> stream Arrow record batches with backpressure
+```
+
+Tickets are opaque, signed, expiring, replay-policy aware, and contain no SQL or
+credentials. HTTP cancellation and Flight cancellation act on the same qcli
+query. Disconnect behavior, result replay, ticket expiry, and partial-stream
+failure are documented protocol contracts rather than incidental behavior.
+
+The data path preserves Arrow types and metadata without passing through JSON
+or human rendering. Memory, buffered batches, concurrent streams, result spill,
+and replay reads remain bounded.
+
+### 18.19 Flight SQL metadata and capabilities
+
+The complete relevant metadata surface includes:
+
+- SQL information and supported features.
+- Catalogs, schemas, tables, table types, and XDBC type information.
+- Primary, imported, exported, and cross-reference keys where supported.
+- Exact Flight SQL-defined Arrow metadata schemas.
+
+`GetSqlInfo` is generated from the active adapter capability profile. qcli must
+not claim the union of all engines or silently emulate unsupported behavior.
+Transactions, updates, prepared statements, ingestion, and Substrait are each
+advertised per target.
+
+JDBC and ODBC compatibility depends on metadata correctness as much as query
+execution, so metadata conformance is a release gate.
+
+### 18.20 Prepared statements, transactions, and ingestion
+
+Full connectivity requires a protocol-neutral prepared-statement service with
+owner/session binding, opaque handles, parameter and result schemas, expiry,
+and explicit closure. Engine-native parameter binding is preferred. qcli must
+never implement parameters through unsafe SQL string interpolation.
+
+Transactions remain unsupported until the shared session and adapter contracts
+can implement target-native begin, commit, rollback, failure, expiry, and
+shutdown behavior correctly. qcli never emulates a cross-engine transaction or
+silently ignores transaction commands.
+
+Arrow `DoPut` ingestion is capability-driven. Create, append, replace, batch
+parameter, partial-failure, retry, and update-count semantics must be explicit
+for each adapter.
+
+### 18.21 Flight SQL security and operations
+
+Flight SQL uses the same `Authenticator`, `AuthenticatedPrincipal`, target ACLs,
+ownership, quotas, and audit policy as HTTP. Bearer credentials travel in gRPC
+metadata and are validated on every RPC unless exchanged for a short-lived,
+principal-bound session credential.
+
+Production requirements include:
+
+- Direct TLS with ALPN `h2` or an explicitly trusted gRPC-aware proxy.
+- Optional mTLS and future JWT/OIDC identity.
+- Connection, stream, request, query, memory, and result quotas.
+- Maximum message sizes, deadlines, keepalive, and connection age.
+- Certificate rotation and graceful listener shutdown.
+- Stable gRPC status and structured SQL/vendor error mapping.
+- Metrics and traces linking Flight request ID, qcli query ID, and engine query
+  ID.
+
+Audit records exclude credentials, authorization metadata, SQL, and result
+values by default.
+
+### 18.22 Multi-node service
+
+Single-node Flight SQL uses the existing process-local session/query service.
+Multi-node operation requires shared logical sessions, query ownership leases,
+distributed quotas, object-backed retained results, and node-independent or
+routable tickets.
+
+Submitting through node A and consuming through node B must either work through
+shared state or return a Flight endpoint location for the owning node. Sticky
+routing alone is an initial deployment constraint, not the final consistency
+model.
+
 ## 19. Rust architecture
 
 Proposed workspace boundaries:
@@ -1189,7 +1378,9 @@ qcli-driver-databricks Databricks SQL adapter
 qcli-driver-snowflake Snowflake adapter
 qcli-metadata         normalized metadata and caching
 qcli-output           table and machine serializers
-qcli-http             HTTP sessions, queries, events, and results
+qcli-http             HTTP transport, resources, events, and result representations
+qcli-service          protocol-neutral ownership, quotas, retention, and lifecycle
+qcli-flight-sql       Flight and Flight SQL gRPC frontend
 ```
 
 This is a conceptual decomposition, not a requirement to create many crates immediately. Early development may keep components in modules until interfaces stabilize.
@@ -1240,7 +1431,7 @@ Network drivers and asynchronous warehouse APIs favor async I/O. The internal qu
 
 ### 19.4 Core services
 
-Both terminal and HTTP frontends depend on the same core services:
+Terminal, HTTP, and Flight SQL frontends depend on the same core services:
 
 ```text
 SessionManager
@@ -1260,7 +1451,9 @@ QueryService
 └── cancel
 ```
 
-The terminal owns one session. The HTTP frontend manages many sessions. Neither frontend contains engine-specific execution logic.
+The terminal owns one process-local session. In serve mode, `qcli-service`
+manages many sessions shared by the HTTP and Flight SQL frontends. No frontend
+contains engine-specific execution logic.
 
 ## 20. Performance requirements
 
@@ -1473,9 +1666,15 @@ Analytical users can accidentally request enormous datasets. Streaming, paging, 
 - A target can override display settings such as decimal places and string truncation.
 - Users can select a target at startup and switch targets during an interactive session.
 - Transaction awareness is not required in the first release.
-- Terminal and future HTTP frontends share one logical session and query execution model.
+- Terminal, HTTP, and Flight SQL frontends share one logical session and query
+  execution model.
 - Every query executes from an immutable session snapshot.
-- HTTP support is delivered through `qcli serve`, not by spawning CLI subprocesses.
+- HTTP and Flight SQL support are delivered through one global `qcli serve`
+  runtime, not by spawning CLI subprocesses.
+- HTTP is the control and operations plane; Flight SQL is the standard remote
+  SQL and Arrow data plane.
+- Standard ADBC Flight SQL drivers are the first client path; JDBC and ODBC are
+  enabled through independently tested Flight SQL-compatible drivers.
 
 ## 26. Open decisions
 

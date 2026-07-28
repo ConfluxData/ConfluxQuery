@@ -10,7 +10,8 @@ Initial engines: Trino, Databricks SQL, Snowflake
 
 Deliver qcli as a reliable Rust query client for analytical platforms, with:
 
-- One reusable execution core shared by interactive CLI, batch CLI, and HTTP.
+- One reusable execution and service core shared by interactive CLI, batch CLI,
+  HTTP, and Flight SQL.
 - Named targets loaded from the sectioned `~/.qcli/.env` file.
 - Trino, Databricks SQL, and Snowflake adapters.
 - Versioned sessions and immutable query snapshots.
@@ -27,26 +28,21 @@ The plan prioritizes a thin but complete vertical path before breadth. Every mil
 Business concepts belong in reusable core crates. Protocols and presentation belong at the edges.
 
 ```text
-                         ┌──────────────┐
-                         │ Interactive  │
-                         │ CLI          │
-                         └──────┬───────┘
-                                │
-┌───────────┐             ┌─────▼──────┐             ┌──────────────┐
-│ Batch CLI │────────────►│ qcli-core  │◄────────────│ HTTP service │
-└───────────┘             │ sessions   │             └──────────────┘
-                          │ queries    │
-                          │ results    │
-                          └─────┬──────┘
-                                │
-                    ┌───────────▼───────────┐
-                    │ engine adapter API    │
-                    └─────┬──────┬──────┬───┘
-                          │      │      │
-                     Trino   Databricks Snowflake
+ Interactive CLI ─┐
+                  ├──────────────► qcli-core execution ◄─────────────┐
+       Batch CLI ─┘                                                  │
+                                                                     │
+ HTTP control plane ─┐                                               │
+                     ├──► qcli-service: ownership, quotas, state ─────┤
+ Flight SQL data ────┘                                               │
+                                                                     ▼
+                                                       engine adapter API
+                                                    ┌────────┼──────────┐
+                                                  Trino  Databricks  Snowflake
 ```
 
-Frontends must never contain engine protocol logic. Adapters must never render terminal output or HTTP responses.
+Frontends must never contain engine protocol logic. Adapters must never render
+terminal, HTTP, gRPC, or Flight SQL responses.
 
 ### 2.2 Native SQL pass-through
 
@@ -112,6 +108,8 @@ qcli-driver-snowflake/
 qcli-repl/
 qcli-metadata/
 qcli-http/
+qcli-service/
+qcli-flight-sql/
 ```
 
 Avoid creating a crate for every concept immediately. A new crate is justified when it establishes a dependency boundary, has multiple consumers, or isolates a large optional dependency.
@@ -225,15 +223,38 @@ Owns HTTP transport only:
 
 - Routes and versioned API DTOs.
 - Authentication/authorization middleware.
-- Session and query ownership.
 - Content negotiation.
 - SSE serialization.
 - HTTP pagination tokens.
-- Result retention and service quotas.
 
-It calls the same `SessionManager` and `QueryService` as the terminal.
+It delegates session ownership, query ownership, retention, and quotas to
+`qcli-service`.
 
-### 3.10 `qcli-test-support`
+### 3.10 `qcli-service`
+
+Owns protocol-neutral service behavior:
+
+- Session and query ownership.
+- Authentication context and authorization decisions.
+- Query admission, quotas, cancellation, and retention.
+- Shared lifecycle events and observability.
+- Coordination between HTTP and Flight SQL frontends.
+
+It calls the same core session and query services as the terminal.
+
+### 3.11 `qcli-flight-sql`
+
+Owns Flight and Flight SQL transport only:
+
+- gRPC services, protobuf/Arrow protocol handling, and middleware.
+- Flight SQL statements, tickets, endpoints, and actions.
+- Arrow schema and record-batch streaming.
+- Flight metadata, prepared-statement, and ingestion protocol mapping.
+
+It delegates state and lifecycle policy to `qcli-service`; it contains no
+engine-specific execution logic.
+
+### 3.12 `qcli-test-support`
 
 Owns reusable test components:
 
@@ -347,6 +368,18 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 | M10 — Local HTTP query service | Complete | Manage sessions and queries over localhost HTTP |
 | M11 — Production HTTP service | Complete | Secure multi-user HTTP operation with bounded resources |
 | M12 — Packaged release | In progress | Install and run signed cross-platform artifacts |
+| M13 — Shared service runtime | Pending | HTTP and future Flight SQL reuse one canonical service state |
+| M14 — Flight SQL foundation | Pending | Start a secure Flight SQL listener and complete protocol discovery |
+| M15 — Flight SQL query streaming | Pending | Execute and stream Arrow results across all three engines |
+| M16 — Unified Flight sessions | Pending | Manage target and context through standard Flight SQL sessions |
+| M17 — Flight SQL metadata | Pending | Browse complete target-aware SQL metadata through standard clients |
+| M18 — Prepared statements and updates | Pending | Bind typed parameters and execute queries/updates safely |
+| M19 — ADBC and JDBC compatibility | Pending | Pass supported ADBC and JDBC client profiles |
+| M20 — ODBC and BI compatibility | Pending | Connect approved ODBC and representative BI clients |
+| M21 — Ingestion and advanced transfer | Pending | Upload Arrow batches and use scalable multi-endpoint results |
+| M22 — Enterprise identity and transport | Pending | Operate Flight SQL with OIDC, mTLS, rotation, and hardened gRPC |
+| M23 — High availability | Pending | Share sessions/results and survive node failure |
+| M24 — Unified connectivity release | Pending | Publish supported HTTP, Flight SQL, ADBC, JDBC, and ODBC workflows |
 
 Allowed status values are `Pending`, `In progress`, `Blocked`, and `Complete`. A milestone becomes `Complete` only after its automated tests, live or deterministic demo, documentation, and milestone report are present.
 
@@ -498,7 +531,7 @@ Must demonstrate:
 
 Exit gate:
 
-- Metadata APIs are reusable by terminal and HTTP.
+- Metadata APIs are reusable by terminal, HTTP, and Flight SQL.
 - Target, identity, role, catalog, and schema cannot leak cache entries across contexts.
 
 ### M7 — Databricks SQL
@@ -689,6 +722,294 @@ Exit gate:
 - Clean-machine smoke tests pass on every supported platform.
 - Published artifacts reproduce the documented capabilities.
 
+### M13 — Shared service runtime
+
+Demo:
+
+```text
+Submit equivalent queries through HTTP and a service-level client.
+Observe one query lifecycle, ownership policy, result store, and audit model.
+```
+
+Must demonstrate:
+
+- Extract protocol-neutral ownership, session, query registry, quota, retention,
+  expiry, audit, and graceful-shutdown services from `qcli-http`.
+- Keep `qcli-core` responsible for immutable execution and adapters.
+- Make HTTP a thin transport frontend without behavior regression.
+- Define public internal contracts usable by Flight SQL.
+
+Exit gate:
+
+- Every M10/M11 HTTP contract and security test still passes.
+- HTTP and direct service paths produce identical Arrow results and lifecycle
+  states.
+- No canonical query/session state remains privately owned by `qcli-http`.
+
+### M14 — Flight SQL foundation and secure listener
+
+Demo:
+
+```text
+qcli serve --flight-bind 127.0.0.1:32010
+Flight SQL client authenticates and retrieves server SQL information.
+```
+
+Must demonstrate:
+
+- `qcli-flight-sql` built on the official Rust Arrow Flight SQL/Tonic service.
+- A separately configurable Flight listener within global `qcli serve`.
+- API-key authentication through the shared `Authenticator`.
+- Direct TLS with HTTP/2 ALPN and explicit trusted gRPC proxy policy.
+- Health/readiness, message limits, deadlines, keepalive, and stable gRPC error
+  mapping.
+- Honest minimal `GetSqlInfo` and unsupported-operation responses.
+
+Exit gate:
+
+- Plaintext non-loopback, invalid TLS, invalid authentication, oversized
+  messages, and unimplemented operations fail closed.
+- HTTP and Flight listeners start and shut down as one service runtime.
+
+### M15 — Flight SQL query streaming
+
+Demo:
+
+```text
+Python ADBC Flight SQL executes SELECT against Trino, Databricks, and Snowflake
+and consumes Arrow batches.
+```
+
+Must demonstrate:
+
+- `GetFlightInfo(CommandStatementQuery)` submission.
+- Opaque signed owner-bound query tickets with version and expiry.
+- `DoGet` Arrow streaming with bounded buffers and downstream backpressure.
+- Exact schemas, nested values, decimals, timestamps, nulls, and binary data.
+- Cancellation, disconnect, retry, replay, expiry, and partial-stream policy.
+- Shared query IDs, engine query IDs, quotas, audit, spill, and retention.
+
+Exit gate:
+
+- Multi-gigabyte deterministic results can stream without unbounded memory.
+- HTTP and Flight execution/result parity passes.
+- All three live adapters pass the Flight query profile.
+
+### M16 — Unified Flight sessions
+
+Demo:
+
+```text
+An authenticated Flight client selects qcli.target, catalog, and schema,
+executes queries, switches to another authorized target, and closes the session.
+```
+
+Must demonstrate:
+
+- `SetSessionOptions`, `GetSessionOptions`, and `CloseSession`.
+- Signed expiring session token/cookie bound to the principal.
+- `qcli.target`, catalog, schema, timeout, and engine property mapping.
+- Atomic target switching, immutable query snapshots, TTL renewal, closure, and
+  active-query policy.
+- HTTP and Flight access to the same logical session where explicitly enabled.
+
+Exit gate:
+
+- Cross-principal session access and unauthorized target switching fail.
+- Concurrent mutations preserve version semantics.
+- No credential, SQL, or physical connection state appears in session tokens.
+
+### M17 — Flight SQL metadata and capabilities
+
+Demo:
+
+```text
+ADBC catalog APIs and JDBC DatabaseMetaData browse targets, catalogs, schemas,
+tables, columns, keys, and SQL types.
+```
+
+Must demonstrate:
+
+- Exact Flight SQL schemas for SQL info, catalogs, schemas, tables, table types,
+  XDBC types, and supported key relationships.
+- Target/identity/context-scoped metadata caching.
+- Adapter-driven SQL and feature capability reporting.
+- Correct identifier case, quoting, search patterns, and type mappings.
+
+Exit gate:
+
+- Apache metadata schema tests pass byte-for-byte where defined.
+- Database browsers enumerate all three engines without engine leakage.
+- Unsupported metadata and features are reported explicitly.
+
+### M18 — Prepared statements, parameters, and updates
+
+Demo:
+
+```text
+JDBC PreparedStatement and ADBC parameter batches execute typed queries and
+updates, with correct result schemas and update counts.
+```
+
+Must demonstrate:
+
+- A protocol-neutral prepared statement registry.
+- Opaque owner/session-bound handles, schemas, expiry, and explicit closure.
+- Adapter contract for native typed parameter binding.
+- Flight prepared statement actions and `DoPut` parameter batches.
+- DDL/DML execution and update counts.
+- No SQL string interpolation fallback.
+
+Exit gate:
+
+- Null, decimal, timestamp, binary, nested, and batch binding tests pass.
+- Handle leakage, reuse after closure, cross-principal use, and expiry fail.
+- Each target advertises only behavior its adapter implements.
+
+### M19 — ADBC and JDBC compatibility
+
+Demo:
+
+```text
+Python, Go, Java, and Rust/C-driver-manager ADBC clients execute one profile.
+An Apache Arrow JDBC client browses metadata, prepares, executes, and cancels.
+```
+
+Must demonstrate:
+
+- Versioned ADBC Flight SQL client compatibility matrix.
+- Apache Arrow Flight SQL JDBC compatibility.
+- Documented URI, TLS, authentication, session, and timeout options.
+- Consistent errors, cancellation, types, metadata, and lifecycle behavior.
+- Automated clean-client conformance jobs in release CI.
+
+Exit gate:
+
+- Supported ADBC and JDBC versions pass against every supported engine.
+- Published qcli artifacts reproduce the client profiles.
+
+### M20 — ODBC and BI-tool compatibility
+
+Demo:
+
+```text
+An approved Flight SQL ODBC driver and representative BI application browse
+metadata and execute an analytical query through qcli.
+```
+
+Must demonstrate:
+
+- Selection and licensing review of a compatible Flight SQL ODBC driver.
+- Windows Driver Manager, Linux unixODBC, and supported macOS coverage.
+- DSN, TLS, authentication, metadata, type, cancellation, and diagnostics.
+- Representative Power BI, Excel, or equivalent BI-tool workflow.
+- Explicit experimental/supported compatibility labels.
+
+Exit gate:
+
+- The selected driver passes the supported-platform ODBC profile.
+- At least one representative BI tool passes discovery and query workflows.
+- qcli documentation does not claim compatibility beyond tested clients.
+
+### M21 — Ingestion and advanced transfer
+
+Demo:
+
+```text
+An Arrow client uploads record batches, receives an update count, and queries
+the resulting object; a large read uses multiple Flight endpoints.
+```
+
+Must demonstrate:
+
+- `DoPut` ingestion with create, append, replace, and temporary modes where
+  supported.
+- Bounded upload backpressure, quotas, partial failure, retry, and audit.
+- Adapter ingestion capability and typed Arrow-to-engine conversion.
+- Partitioned/multi-endpoint result delivery and compression policy.
+
+Exit gate:
+
+- Large upload/download, cancellation, retry, and failure-injection suites pass.
+- Unsupported ingestion modes fail before partial mutation where possible.
+
+### M22 — Enterprise identity and transport
+
+Demo:
+
+```text
+API-key, OIDC/JWT, and mTLS principals receive different target policies while
+certificates and JWKS rotate without service interruption.
+```
+
+Must demonstrate:
+
+- JWT/OIDC validation, issuer/audience policy, group/role mapping, and JWKS
+  rotation.
+- mTLS identity mapping and optional OAuth token exchange.
+- Direct Flight TLS, gRPC-aware proxy mode, certificate reload, and connection
+  rotation.
+- Per-principal connection/stream/query quotas and security telemetry.
+- Shared HTTP/Flight authentication and audit semantics.
+
+Exit gate:
+
+- Multi-principal security and credential/certificate rotation suites pass.
+- No identity can cross target, session, query, result, ticket, or statement
+  ownership boundaries.
+
+### M23 — High availability and shared state
+
+Demo:
+
+```text
+Submit through node A, consume through node B, terminate node A, and retain
+authorized access without corrupting or exposing another caller's state.
+```
+
+Must demonstrate:
+
+- Shared session and prepared-statement state.
+- Query ownership leases and orphan-query policy.
+- Object-backed retained results.
+- Distributed quotas and audit correlation.
+- Node-independent or explicitly routable signed tickets.
+- Rolling upgrade compatibility and protocol/state versioning.
+
+Exit gate:
+
+- Multi-node failover, retry, expiry, split-brain, and rolling-upgrade tests pass.
+- Node failure cannot cause cross-principal data exposure or duplicate mutation.
+
+### M24 — Unified connectivity release
+
+Demo:
+
+```text
+qcli serve
+HTTP query
+Python ADBC query
+Java JDBC query
+approved ODBC/BI query
+all use one authorized target, query core, audit trail, and observability model.
+```
+
+Must demonstrate:
+
+- Signed packaged Flight SQL-capable server artifacts.
+- Supported HTTP, native Flight SQL, ADBC, JDBC, and approved ODBC workflows.
+- Deployment, TLS, identity, scaling, client, migration, rollback, and incident
+  documentation.
+- Published compatibility, conformance, security, reliability, and performance
+  evidence.
+
+Exit gate:
+
+- Clean-machine client suites pass on supported platforms.
+- Load, backpressure, protocol, security, and multi-node gates pass.
+- `docs/milestones/milestone-24-notes.md` records the unified connectivity
+  release evidence and accepted limitations.
+
 ### Milestone completion artifacts
 
 Every milestone produces:
@@ -818,7 +1139,8 @@ Gate:
 - One million generated rows can stream through CSV/JSONL with bounded memory.
 - Machine output is independent of locale and display settings.
 
-Deliverable: reusable output crate usable by CLI and HTTP.
+Deliverable: reusable output and Arrow conversion components usable by CLI,
+HTTP, and Flight SQL.
 
 ### Work package 4: Trino vertical slice
 
@@ -918,7 +1240,7 @@ Tests:
 
 Gate:
 
-- Metadata logic is reusable by terminal and future HTTP endpoints.
+- Metadata logic is reusable by terminal, HTTP, and Flight SQL endpoints.
 
 Deliverable: warehouse discovery and context-aware completion.
 
@@ -1055,6 +1377,219 @@ Gate:
 
 Deliverable: supported qcli release.
 
+### Work package 12: Shared service extraction
+
+Purpose: ensure HTTP and Flight SQL reuse one canonical stateful service.
+
+Tasks:
+
+- Move ownership, session registry, query registry, result retention, quotas,
+  expiry, audit, and shutdown orchestration into `qcli-service`.
+- Keep execution snapshots and adapter orchestration in `qcli-core`.
+- Define transport-neutral request/service contracts and error taxonomy.
+- Convert HTTP to a thin adapter over those contracts.
+
+Gate:
+
+- M10/M11 tests pass without duplicate state registries.
+- Direct service and HTTP contract tests prove lifecycle and Arrow parity.
+
+Deliverable: stable service boundary for additional protocols.
+
+### Work package 13: Flight SQL protocol foundation
+
+Purpose: establish a secure, spec-driven Flight SQL frontend.
+
+Tasks:
+
+- Add `qcli-flight-sql` using `arrow-flight` and Tonic.
+- Implement server discovery, handshake/authentication, health, SQL info, TLS,
+  limits, deadlines, keepalive, and gRPC error mapping.
+- Add Flight listener composition to global `qcli serve`.
+- Define versioned session-token and ticket formats with rotation support.
+
+Gate:
+
+- Protocol discovery and security-negative tests pass.
+- Unsupported RPCs return correct standard statuses.
+
+Deliverable: authenticated Flight SQL listener.
+
+### Work package 14: Flight query and Arrow streaming
+
+Purpose: expose shared qcli queries through standard Flight statement execution.
+
+Tasks:
+
+- Implement statement `GetFlightInfo`, signed tickets, and `DoGet`.
+- Bridge shared cancellation, ownership, retention, spill, and audit.
+- Implement bounded channels, backpressure, disconnect, replay, and expiry.
+- Preserve complete Arrow schemas and values.
+
+Gate:
+
+- Large streaming, type fidelity, cancellation, and HTTP/Flight parity suites
+  pass against demo and live adapters.
+
+Deliverable: production-grade read query data plane.
+
+### Work package 15: Flight sessions
+
+Purpose: map Flight SQL connection/session behavior to qcli sessions.
+
+Tasks:
+
+- Implement set/get/close session options.
+- Map `qcli.target`, catalog, schema, timeout, and engine properties.
+- Bind signed session tokens to principal and versioned state.
+- Share target ACL, mutation, TTL, and shutdown rules with HTTP.
+
+Gate:
+
+- Cross-protocol state and multi-principal isolation tests pass.
+
+Deliverable: persistent contextual Flight sessions.
+
+### Work package 16: Flight metadata and capability conformance
+
+Purpose: support database discovery and truthful client feature negotiation.
+
+Tasks:
+
+- Implement all relevant Flight SQL metadata commands with exact schemas.
+- Generate `GetSqlInfo` from adapter capabilities.
+- Normalize identifier, pattern, key, and XDBC type behavior.
+- Reuse scoped metadata cache and invalidation.
+
+Gate:
+
+- Apache schema tests and database-browser profiles pass on all engines.
+
+Deliverable: complete supported metadata surface.
+
+### Work package 17: Statements, parameters, updates, and transactions
+
+Purpose: support stateful database APIs without unsafe emulation.
+
+Tasks:
+
+- Add prepared statement registry and adapter binding contract.
+- Implement typed/batched parameters, statement closure, and update counts.
+- Extend adapter capabilities for native prepared statements and DML.
+- Design target-native transaction handles and lifecycle; keep them disabled
+  until the relevant adapter passes correctness gates.
+
+Gate:
+
+- Parameter/type/ownership tests pass with no SQL interpolation.
+- Transaction capability reporting is exact.
+
+Deliverable: JDBC/ADBC-ready statement semantics.
+
+### Work package 18: ADBC and JDBC conformance
+
+Purpose: turn protocol compliance into supported client compatibility.
+
+Tasks:
+
+- Automate Python, Go, Java, Rust, and C-driver-manager ADBC profiles.
+- Automate Apache Arrow Flight SQL JDBC profiles.
+- Test TLS, auth, metadata, prepared queries, cancellation, and errors.
+- Publish client/version recipes and compatibility matrix.
+
+Gate:
+
+- Selected versions pass every supported engine and packaged server artifact.
+
+Deliverable: supported ADBC and JDBC connectivity.
+
+### Work package 19: ODBC and BI conformance
+
+Purpose: support traditional analytics tools through a verified Flight SQL ODBC
+driver.
+
+Tasks:
+
+- Select and review driver licensing/distribution.
+- Test Windows, Linux, and supported macOS driver managers.
+- Validate DSN, metadata, types, parameters, cancellation, and diagnostics.
+- Exercise representative BI tools.
+
+Gate:
+
+- Approved driver/platform/client combinations pass and are documented without
+  broader claims.
+
+Deliverable: explicitly scoped ODBC/BI compatibility.
+
+### Work package 20: Ingestion and advanced transfer
+
+Purpose: support Arrow uploads and scalable result distribution.
+
+Tasks:
+
+- Implement `DoPut` ingestion and adapter ingestion capabilities.
+- Define create/append/replace, partial failure, update count, and retry policy.
+- Add partitioned/multi-endpoint results and compression tuning.
+- Enforce upload/download backpressure and quotas.
+
+Gate:
+
+- Large bidirectional transfer and fault-injection profiles pass.
+
+Deliverable: bounded Arrow ingestion and advanced reads.
+
+### Work package 21: Enterprise Flight security
+
+Purpose: provide enterprise identity and hardened gRPC transport.
+
+Tasks:
+
+- Add OIDC/JWT, JWKS rotation, mTLS identity, and optional token exchange.
+- Support direct TLS and trusted gRPC proxy topology with certificate rotation.
+- Add connection and stream quotas, security metrics, and trace correlation.
+- Apply identical identity/ACL/audit behavior to HTTP and Flight.
+
+Gate:
+
+- Identity isolation, rotation, TLS, proxy, and abuse tests pass.
+
+Deliverable: enterprise-secure service edge.
+
+### Work package 22: Distributed service state
+
+Purpose: remove single-node ownership and result-location constraints.
+
+Tasks:
+
+- Add shared sessions, statement handles, query leases, quotas, and audit IDs.
+- Store retained results in an object store.
+- Make tickets node-independent or explicitly routable.
+- Define orphan queries, failover, retries, and rolling upgrades.
+
+Gate:
+
+- Node failure and rolling-upgrade profiles preserve isolation and correctness.
+
+Deliverable: highly available qcli service.
+
+### Work package 23: Unified connectivity release
+
+Purpose: publish and support the complete remote connectivity product.
+
+Tasks:
+
+- Package Flight-enabled binaries and deployment assets.
+- Run HTTP, Flight, ADBC, JDBC, ODBC, load, security, and HA release profiles.
+- Publish compatibility, performance, operations, migration, and rollback
+  documentation.
+
+Gate:
+
+- Published artifacts pass clean-machine supported-client demonstrations.
+
+Deliverable: unified qcli connectivity release.
+
 ## 7. Workstream ownership
 
 These workstreams can proceed concurrently only after their dependencies stabilize:
@@ -1071,6 +1606,13 @@ These workstreams can proceed concurrently only after their dependencies stabili
 | Snowflake | Trino contract review | Third adapter |
 | HTTP | Stable session/query core | Service frontend |
 | Release | Stable cross-engine behavior | Packages and support policy |
+| Shared service | Production HTTP contracts | Protocol-neutral state/lifecycle |
+| Flight SQL | Shared service + packaged release | Standard Arrow SQL data plane |
+| ADBC/JDBC | Flight query/session/metadata | Supported client profiles |
+| ODBC/BI | JDBC metadata maturity | Approved compatibility matrix |
+| Ingestion | Prepared statement/adapter extensions | Arrow upload and advanced reads |
+| Enterprise security | Flight production listener | OIDC, mTLS, hardened transport |
+| High availability | Stable ticket/state contracts | Shared state and failover |
 
 The second adapter is an architecture test. Expect small contract refinements, but reject changes that expose Databricks-specific concepts directly through generic frontend APIs. The third adapter should require fewer core changes; otherwise the abstraction remains too narrow.
 
@@ -1163,6 +1705,7 @@ Critical dependency decisions requiring a short ADR:
 - Pseudo-terminal REPL tests.
 - Containerized Trino.
 - HTTP service contract tests.
+- Flight SQL protocol and interoperability tests.
 - Disk spill and cleanup tests.
 
 ### Protected external tests
@@ -1180,6 +1723,7 @@ Critical dependency decisions requiring a short ADR:
 - Dependency vulnerability scans.
 - Cross-platform release smoke tests.
 - Engine version compatibility matrix.
+- ADBC, JDBC, and certified ODBC compatibility matrix.
 
 ## 11. Documentation deliverables
 
@@ -1283,6 +1827,18 @@ The recommended first implementation sequence is:
 18. HTTP sessions and stateless execution.
 19. HTTP result retention and production security.
 20. Packaging and supported release.
+21. Extract the protocol-neutral shared service runtime.
+22. Add secure Flight SQL listener, authentication, discovery, and SQL info.
+23. Add statement query tickets and bounded Arrow `DoGet` streaming.
+24. Add Flight session options, target selection, and cross-protocol state.
+25. Complete Flight SQL metadata and capability conformance.
+26. Add prepared statements, typed parameters, updates, and adapter extensions.
+27. Certify supported ADBC Flight SQL and Apache Arrow JDBC clients.
+28. Select and certify scoped Flight SQL ODBC and BI-tool compatibility.
+29. Add Arrow ingestion and multi-endpoint advanced transfer.
+30. Add OIDC/JWT, mTLS, rotation, and hardened gRPC operations.
+31. Add shared state, object results, query leases, and multi-node failover.
+32. Publish the unified HTTP/Flight/ADBC/JDBC/ODBC connectivity release.
 
 ## 15. Definition of done
 
@@ -1294,14 +1850,16 @@ A feature is done only when:
 - Cancellation and error behavior are defined.
 - Secret handling is reviewed.
 - Memory behavior is bounded or explicitly limited.
-- CLI and HTTP reuse is considered, even if HTTP delivery is later.
+- CLI, HTTP, Flight SQL, and shared-service reuse is considered.
 - User documentation is updated.
 - Unsupported-engine behavior is explicit.
 - No engine-specific workaround leaks into generic frontend code.
 
 ## 16. Success criteria
 
-The execution plan succeeds when qcli can add a fourth engine without redesigning terminal, HTTP, session, query lifecycle, or output code. The expected work for a new engine should primarily be:
+The execution plan succeeds when qcli can add a fourth engine without
+redesigning terminal, HTTP, Flight SQL, session, query lifecycle, metadata, or
+output code. The expected work for a new engine should primarily be:
 
 1. Define its target property schema.
 2. Implement the adapter capabilities it supports.
@@ -1310,4 +1868,8 @@ The execution plan succeeds when qcli can add a fourth engine without redesignin
 5. Implement metadata operations.
 6. Pass the shared conformance suite.
 
-Likewise, a new frontend should be able to submit and manage queries through core services without importing engine clients, and a new output format should consume result batches without knowing which engine produced them.
+Likewise, a new frontend should submit and manage queries through
+`qcli-service` without importing engine clients; a new output format should
+consume result batches without knowing which engine produced them; and standard
+Flight SQL clients should discover unsupported engine behavior through
+capabilities rather than protocol failure.
