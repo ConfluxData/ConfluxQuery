@@ -5,6 +5,7 @@ qcli is one query shell for cloud data platforms. Initial engine targets are Tri
 Architecture and delivery documentation:
 
 - [Product design](docs/product-design.md)
+- [Feature roadmap](docs/features-roadmap.md)
 - [Execution plan and demonstrable milestones](docs/execution-plan.md)
 - [Extensible authentication providers](docs/adr-003-extensible-authentication.md)
 - [Databricks and Snowflake Rust client selection](docs/adr-004-databricks-snowflake-clients.md)

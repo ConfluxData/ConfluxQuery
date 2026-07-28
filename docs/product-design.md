@@ -2,6 +2,8 @@
 
 Status: Proposed
 
+Long-term capabilities: [Feature Roadmap](features-roadmap.md)
+
 Initial engines: Trino, Databricks SQL, Snowflake
 
 Implementation language: Rust
@@ -75,6 +77,8 @@ The name means “query command-line interface.” It avoids implying that qcli 
 - Use one session and query model for terminal, HTTP, and Flight SQL state.
 - Keep HTTP as the control/operations API and Flight SQL as the Arrow-native SQL
   data plane.
+- Add an explicit, versioned SQL transpilation mode for a certified portable
+  subset after native multi-engine execution is stable.
 
 ## 4. Non-goals for the first release
 
@@ -1675,6 +1679,8 @@ Analytical users can accidentally request enormous datasets. Streaming, paging, 
   SQL and Arrow data plane.
 - Standard ADBC Flight SQL drivers are the first client path; JDBC and ODBC are
   enabled through independently tested Flight SQL-compatible drivers.
+- Native SQL pass-through remains the default. Future transpilation is opt-in,
+  observable, versioned, and fail-closed as defined by the feature roadmap.
 
 ## 26. Open decisions
 

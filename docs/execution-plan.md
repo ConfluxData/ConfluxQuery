@@ -4,6 +4,8 @@ Status: Proposed
 
 Related design: [Product and Technical Design](product-design.md)
 
+Long-term capabilities: [Feature Roadmap](features-roadmap.md)
+
 Initial engines: Trino, Databricks SQL, Snowflake
 
 ## 1. Objective
@@ -46,7 +48,12 @@ terminal, HTTP, gRPC, or Flight SQL responses.
 
 ### 2.2 Native SQL pass-through
 
-qcli sends SQL to the selected engine without requiring a local semantic parse. Local SQL processing is limited to statement boundary detection, highlighting, completion context, and optional warnings.
+qcli sends SQL to the selected engine without requiring a local semantic parse.
+Local SQL processing is limited to statement boundary detection, highlighting,
+completion context, and optional warnings. A future dialect transpiler is an
+explicit, observable, fail-closed preprocessing mode; native pass-through
+remains the default. Its product contract and staged delivery are defined in the
+[feature roadmap](features-roadmap.md).
 
 ### 2.3 Capability-driven behavior
 
