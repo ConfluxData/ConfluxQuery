@@ -1,8 +1,7 @@
 //! Versioned localhost HTTP transport over qcli's shared session/query core.
 
 use arrow_array::RecordBatch;
-use arrow_ipc::reader::FileReader;
-use arrow_ipc::writer::{FileWriter, StreamWriter};
+use arrow_ipc::writer::StreamWriter;
 use axum::body::Body;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
@@ -14,21 +13,21 @@ use axum::{Json, Router};
 use base64::Engine;
 use futures_util::StreamExt;
 use qcli_auth::{AuthenticatedPrincipal, AuthenticationErrorKind, Authenticator};
-use qcli_config::{Config, ResolvedTarget};
-use qcli_core::{CoreError, QueryItem, QueryService, SessionManager, SessionSnapshot};
-use qcli_driver_api::{CancellationSignal, EngineAdapter, QueryEvent, QueryProgress, QueryState};
+use qcli_config::Config;
+use qcli_core::SessionSnapshot;
+use qcli_driver_api::EngineAdapter;
 use qcli_output::{DisplayOptions, OutputFormat, StreamOutput};
+pub use qcli_service::{AuditEvent, AuditSink};
+use qcli_service::{GatewayService, QueryStatus, ServiceError, ServiceErrorKind, ServiceLimits};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::io::Cursor;
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
@@ -74,27 +73,6 @@ pub struct HttpOperations {
     pub allowed_origins: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct AuditEvent {
-    pub action: String,
-    pub outcome: String,
-    pub principal: Option<String>,
-    pub target: Option<String>,
-    pub session_id: Option<String>,
-    pub query_id: Option<String>,
-}
-
-pub trait AuditSink: Send + Sync {
-    fn record(&self, event: &AuditEvent);
-}
-
-#[derive(Debug)]
-struct NullAuditSink;
-
-impl AuditSink for NullAuditSink {
-    fn record(&self, _event: &AuditEvent) {}
-}
-
 #[derive(Debug)]
 struct StderrAuditSink;
 
@@ -111,78 +89,13 @@ pub fn stderr_audit_sink() -> Arc<dyn AuditSink> {
     Arc::new(StderrAuditSink)
 }
 
-#[derive(Debug, Clone)]
-struct SessionOwner {
-    principal: String,
-    last_access: Instant,
-}
-
 #[derive(Clone)]
 struct AppState {
-    config: Arc<Config>,
-    sessions: Arc<SessionManager>,
-    session_owners: Arc<Mutex<HashMap<String, SessionOwner>>>,
-    queries: Arc<QueryService>,
-    records: Arc<Mutex<HashMap<String, Arc<QueryRecord>>>>,
+    service: GatewayService,
     limits: HttpLimits,
     page_secret: u64,
     authenticator: Option<Arc<dyn Authenticator>>,
     operations: HttpOperations,
-    audit: Arc<dyn AuditSink>,
-    shutting_down: Arc<AtomicBool>,
-}
-
-struct QueryRecord {
-    id: String,
-    owner: String,
-    session_id: String,
-    session_version: u64,
-    target: String,
-    engine: String,
-    cancel: CancellationSignal,
-    data: Mutex<QueryData>,
-    events: broadcast::Sender<EventEntry>,
-}
-
-struct QueryData {
-    state: String,
-    engine_query_id: Option<String>,
-    rows: usize,
-    retained_bytes: usize,
-    storage: ResultStorage,
-    events: Vec<EventEntry>,
-    next_event_id: u64,
-    error: Option<ApiErrorBody>,
-    completed_at: Option<Instant>,
-}
-
-enum ResultStorage {
-    Memory(Vec<RecordBatch>),
-    Spill {
-        path: PathBuf,
-        writer: Option<Box<FileWriter<std::fs::File>>>,
-    },
-}
-
-impl Drop for QueryRecord {
-    fn drop(&mut self) {
-        if let ResultStorage::Spill { path, .. } = &self
-            .data
-            .lock()
-            .expect("query record mutex poisoned")
-            .storage
-        {
-            std::fs::remove_file(path).ok();
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct EventEntry {
-    id: u64,
-    event: String,
-    data: Value,
-    terminal: bool,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -244,19 +157,22 @@ impl HttpService {
         let page_secret = u64::from_le_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]);
+        let service_limits = ServiceLimits {
+            max_queries: limits.max_queries,
+            memory_result_bytes_per_query: limits.memory_result_bytes_per_query,
+            max_result_bytes_per_query: limits.max_result_bytes_per_query,
+            result_ttl: limits.result_ttl,
+            max_sql_bytes: limits.max_sql_bytes,
+            session_ttl: limits.session_ttl,
+            shutdown_grace: limits.shutdown_grace,
+        };
         Self {
             state: AppState {
-                config: Arc::new(config),
-                sessions: Arc::new(SessionManager::default()),
-                session_owners: Arc::new(Mutex::new(HashMap::new())),
-                queries: Arc::new(QueryService::new(adapters, 8)),
-                records: Arc::new(Mutex::new(HashMap::new())),
+                service: GatewayService::new(config, adapters, service_limits),
                 limits,
                 page_secret,
                 authenticator: None,
                 operations: HttpOperations::default(),
-                audit: Arc::new(NullAuditSink),
-                shutting_down: Arc::new(AtomicBool::new(false)),
             },
         }
     }
@@ -274,9 +190,14 @@ impl HttpService {
     }
 
     #[must_use]
-    pub fn with_audit_sink(mut self, audit: Arc<dyn AuditSink>) -> Self {
-        self.state.audit = audit;
+    pub fn with_audit_sink(self, audit: Arc<dyn AuditSink>) -> Self {
+        self.state.service.set_audit_sink(audit);
         self
+    }
+
+    #[must_use]
+    pub fn gateway(&self) -> GatewayService {
+        self.state.service.clone()
     }
 
     pub fn router(&self) -> Router {
@@ -345,23 +266,22 @@ impl HttpService {
             let mut interval = tokio::time::interval(cleanup_state.limits.cleanup_interval);
             loop {
                 interval.tick().await;
-                if cleanup_state.shutting_down.load(Ordering::Acquire) {
+                if cleanup_state.service.is_shutting_down() {
                     return;
                 }
-                cleanup_expired(&cleanup_state);
+                cleanup_state.service.cleanup_expired();
             }
         });
         let shutdown_state = state.clone();
         let signal = async move {
             shutdown.await;
-            shutdown_state.shutting_down.store(true, Ordering::Release);
-            cancel_active_queries(&shutdown_state);
+            shutdown_state.service.begin_shutdown();
         };
         let result = axum::serve(listener, self.router())
             .with_graceful_shutdown(signal)
             .await;
         cleanup.abort();
-        wait_for_queries(&state).await;
+        state.service.wait_for_queries().await;
         result
     }
 }
@@ -371,7 +291,7 @@ async fn enforce_http_operations(
     request: axum::extract::Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    if state.shutting_down.load(Ordering::Acquire) {
+    if state.service.is_shutting_down() {
         return Err(ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "shutting_down",
@@ -609,6 +529,25 @@ struct QueryResponse {
     error: Option<ApiErrorBody>,
 }
 
+impl From<QueryStatus> for QueryResponse {
+    fn from(status: QueryStatus) -> Self {
+        Self {
+            id: status.id,
+            session_id: status.session_id,
+            session_version: status.session_version,
+            target: status.target,
+            engine: status.engine,
+            engine_query_id: status.engine_query_id,
+            state: status.state,
+            rows: status.rows,
+            error: status.error.map(|error| ApiErrorBody {
+                code: error.code,
+                message: error.message,
+            }),
+        }
+    }
+}
+
 #[derive(OpenApi)]
 #[openapi(
     info(
@@ -685,32 +624,13 @@ async fn create_session(
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Json(request): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<SessionResponse>), ApiError> {
-    enforce_session_quota(&state, &principal)?;
-    let target = target(&state, &principal, &request.target)?;
     let mut overrides = values(request.context)?;
     overrides.extend(values(request.properties)?);
     overrides.extend(values(request.options)?);
-    let snapshot = state.sessions.create_with_overrides(target, overrides);
-    state
-        .session_owners
-        .lock()
-        .expect("session owner mutex poisoned")
-        .insert(
-            snapshot.id.clone(),
-            SessionOwner {
-                principal: principal.id.clone(),
-                last_access: Instant::now(),
-            },
-        );
-    audit(
-        &state,
-        "session.create",
-        "allowed",
-        Some(&principal),
-        Some(&snapshot.target),
-        Some(&snapshot.id),
-        None,
-    );
+    let snapshot = state
+        .service
+        .create_session(&principal, &request.target, overrides)
+        .map_err(service_error)?;
     Ok((StatusCode::CREATED, Json(snapshot.into())))
 }
 
@@ -729,12 +649,11 @@ async fn get_session(
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    require_session_owner(&state, &principal, &session_id)?;
     Ok(Json(
         state
-            .sessions
-            .snapshot(&session_id)
-            .map_err(|error| core_error(&error))?
+            .service
+            .session(&principal, &session_id)
+            .map_err(service_error)?
             .into(),
     ))
 }
@@ -758,14 +677,13 @@ async fn update_session(
     Path(session_id): Path<String>,
     Json(request): Json<UpdateSessionRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    require_session_owner(&state, &principal, &session_id)?;
     let mut overrides = values(request.context)?;
     overrides.extend(values(request.properties)?);
     overrides.extend(values(request.options)?);
     let snapshot = state
-        .sessions
-        .set_options(&session_id, request.expected_version, overrides)
-        .map_err(|error| core_error(&error))?;
+        .service
+        .update_session(&principal, &session_id, request.expected_version, overrides)
+        .map_err(service_error)?;
     Ok(Json(snapshot.into()))
 }
 
@@ -815,12 +733,15 @@ async fn switch_session_target(
     Path(session_id): Path<String>,
     Json(request): Json<SwitchTargetRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    require_session_owner(&state, &principal, &session_id)?;
-    let target = target(&state, &principal, &request.target)?;
     let snapshot = state
-        .sessions
-        .switch_target(&session_id, request.expected_version, target)
-        .map_err(|error| core_error(&error))?;
+        .service
+        .switch_target(
+            &principal,
+            &session_id,
+            request.expected_version,
+            &request.target,
+        )
+        .map_err(service_error)?;
     Ok(Json(snapshot.into()))
 }
 
@@ -839,25 +760,10 @@ async fn delete_session(
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    require_session_owner(&state, &principal, &session_id)?;
     state
-        .sessions
-        .close(&session_id)
-        .map_err(|error| core_error(&error))?;
-    state
-        .session_owners
-        .lock()
-        .expect("session owner mutex poisoned")
-        .remove(&session_id);
-    audit(
-        &state,
-        "session.delete",
-        "allowed",
-        Some(&principal),
-        None,
-        Some(&session_id),
-        None,
-    );
+        .service
+        .close_session(&principal, &session_id)
+        .map_err(service_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -880,12 +786,11 @@ async fn submit_session_query(
     Path(session_id): Path<String>,
     Json(request): Json<QueryRequest>,
 ) -> Result<(StatusCode, Json<QueryResponse>), ApiError> {
-    require_session_owner(&state, &principal, &session_id)?;
-    let snapshot = state
-        .sessions
-        .snapshot(&session_id)
-        .map_err(|error| core_error(&error))?;
-    submit_query(&state, &principal, &snapshot, request.sql, false)
+    let query = state
+        .service
+        .submit_session_query(&principal, &session_id, request.sql)
+        .map_err(service_error)?;
+    Ok((StatusCode::ACCEPTED, Json(query.into())))
 }
 
 #[utoipa::path(
@@ -905,272 +810,13 @@ async fn submit_stateless_query(
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Json(request): Json<StatelessQueryRequest>,
 ) -> Result<(StatusCode, Json<QueryResponse>), ApiError> {
-    let target = target(&state, &principal, &request.target)?;
     let mut overrides = values(request.context)?;
     overrides.extend(values(request.properties)?);
-    let snapshot = state.sessions.create_with_overrides(target, overrides);
-    state
-        .session_owners
-        .lock()
-        .expect("session owner mutex poisoned")
-        .insert(
-            snapshot.id.clone(),
-            SessionOwner {
-                principal: principal.id.clone(),
-                last_access: Instant::now(),
-            },
-        );
-    submit_query(&state, &principal, &snapshot, request.sql, true)
-}
-
-fn submit_query(
-    state: &AppState,
-    principal: &AuthenticatedPrincipal,
-    snapshot: &SessionSnapshot,
-    sql: String,
-    close_session: bool,
-) -> Result<(StatusCode, Json<QueryResponse>), ApiError> {
-    if sql.is_empty() || sql.len() > state.limits.max_sql_bytes {
-        return Err(ApiError::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "invalid_sql_size",
-            format!("SQL must contain 1..={} bytes", state.limits.max_sql_bytes),
-        ));
-    }
-    cleanup_expired(state);
-    enforce_query_quota(state, principal)?;
-    {
-        let records = state.records.lock().expect("query registry mutex poisoned");
-        if records.len() >= state.limits.max_queries {
-            return Err(ApiError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "query_limit",
-                "local retained-query limit reached",
-            ));
-        }
-    }
-    let handle = state
-        .queries
-        .submit(snapshot.clone(), sql)
-        .map_err(|error| core_error(&error))?;
-    let cancellation = handle.cancellation_signal();
-    let id = format!("qcli_{}", Uuid::new_v4().simple());
-    let (events, _) = broadcast::channel(128);
-    let record = Arc::new(QueryRecord {
-        id: id.clone(),
-        owner: principal.id.clone(),
-        session_id: snapshot.id.clone(),
-        session_version: snapshot.version,
-        target: snapshot.target.clone(),
-        engine: snapshot.engine.clone(),
-        cancel: cancellation,
-        data: Mutex::new(QueryData {
-            state: "submitted".into(),
-            engine_query_id: None,
-            rows: 0,
-            retained_bytes: 0,
-            storage: ResultStorage::Memory(Vec::new()),
-            events: Vec::new(),
-            next_event_id: 1,
-            error: None,
-            completed_at: None,
-        }),
-        events,
-    });
-    state
-        .records
-        .lock()
-        .expect("query registry mutex poisoned")
-        .insert(id, record.clone());
-    audit(
-        state,
-        "query.submit",
-        "allowed",
-        Some(principal),
-        Some(&snapshot.target),
-        Some(&snapshot.id),
-        Some(&record.id),
-    );
-    let response = query_response(&record);
-    tokio::spawn(collect_query(
-        state.sessions.clone(),
-        state.session_owners.clone(),
-        record,
-        handle,
-        state.limits.clone(),
-        close_session,
-    ));
-    Ok((StatusCode::ACCEPTED, Json(response)))
-}
-
-async fn collect_query(
-    sessions: Arc<SessionManager>,
-    session_owners: Arc<Mutex<HashMap<String, SessionOwner>>>,
-    record: Arc<QueryRecord>,
-    mut handle: qcli_core::QueryHandle,
-    limits: HttpLimits,
-    close_session: bool,
-) {
-    let mut overflow = false;
-    let mut session_updates = BTreeMap::new();
-    let mut terminal_event = None;
-    while let Some(item) = handle.next_item().await {
-        match item {
-            QueryItem::Event(event) => {
-                if let QueryEvent::SessionProperties(properties) = &event {
-                    session_updates.extend(properties.clone());
-                }
-                if matches!(
-                    event,
-                    QueryEvent::State(
-                        QueryState::Completed | QueryState::Cancelled | QueryState::Failed
-                    )
-                ) {
-                    terminal_event = Some(event);
-                } else {
-                    record_event(&record, event);
-                }
-            }
-            QueryItem::Batch(batch) => {
-                let mut data = record.data.lock().expect("query record mutex poisoned");
-                if let Err(error) = store_batch(&record.id, &mut data, batch, &limits) {
-                    overflow = true;
-                    data.error = Some(error);
-                    drop(data);
-                    record.cancel.cancel();
-                }
-            }
-        }
-    }
-    let finish = handle.finish().await;
-    if finish.is_ok() && !close_session && !session_updates.is_empty() {
-        sessions
-            .set_options(&record.session_id, record.session_version, session_updates)
-            .ok();
-    }
-    if let Err(error) = finish_results(&record) {
-        let mut data = record.data.lock().expect("query record mutex poisoned");
-        data.error = Some(error);
-        overflow = true;
-    }
-    if let Err(error) = finish {
-        if matches!(&error, CoreError::Driver(driver) if driver.code == "cancelled") {
-            record_event(
-                &record,
-                terminal_event.unwrap_or(QueryEvent::State(QueryState::Cancelled)),
-            );
-            if close_session {
-                sessions.close(&record.session_id).ok();
-                session_owners
-                    .lock()
-                    .expect("session owner mutex poisoned")
-                    .remove(&record.session_id);
-            }
-            return;
-        }
-        let mut data = record.data.lock().expect("query record mutex poisoned");
-        if data.error.is_none() {
-            data.error = Some(ApiErrorBody {
-                code: "query_failed".into(),
-                message: error.to_string(),
-            });
-        }
-        drop(data);
-        push_event(&record, "state", json!({ "state": "failed" }), true);
-    } else if overflow {
-        push_event(&record, "state", json!({ "state": "failed" }), true);
-    } else {
-        record_event(
-            &record,
-            terminal_event.unwrap_or(QueryEvent::State(QueryState::Completed)),
-        );
-    }
-    if close_session {
-        sessions.close(&record.session_id).ok();
-        session_owners
-            .lock()
-            .expect("session owner mutex poisoned")
-            .remove(&record.session_id);
-    }
-}
-
-fn record_event(record: &QueryRecord, event: QueryEvent) {
-    match event {
-        QueryEvent::State(state) => {
-            let state = state_name(state);
-            let terminal = matches!(state, "completed" | "cancelled" | "failed");
-            push_event(record, "state", json!({ "state": state }), terminal);
-        }
-        QueryEvent::EngineQueryId(id) => {
-            record
-                .data
-                .lock()
-                .expect("query record mutex poisoned")
-                .engine_query_id = Some(id.clone());
-            push_event(
-                record,
-                "engine_query_id",
-                json!({ "engine_query_id": id }),
-                false,
-            );
-        }
-        QueryEvent::RowsProduced(rows) => {
-            push_event(record, "rows", json!({ "rows": rows }), false);
-        }
-        QueryEvent::Progress(progress) => {
-            push_event(record, "progress", progress_json(&progress), false);
-        }
-        QueryEvent::SessionProperties(properties) => {
-            let properties = properties
-                .into_iter()
-                .map(|(name, value)| {
-                    let value = if is_sensitive_name(&name) {
-                        "<redacted>".into()
-                    } else {
-                        value
-                    };
-                    (name, value)
-                })
-                .collect::<BTreeMap<_, _>>();
-            push_event(
-                record,
-                "session_properties",
-                json!({ "properties": properties }),
-                false,
-            );
-        }
-    }
-}
-
-fn is_sensitive_name(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    ["password", "token", "secret", "credential", "private_key"]
-        .iter()
-        .any(|part| name.contains(part))
-}
-
-fn push_event(record: &QueryRecord, event: &str, value: Value, terminal: bool) {
-    let entry = {
-        let mut data = record.data.lock().expect("query record mutex poisoned");
-        if event == "state" {
-            if let Some(state) = value.get("state").and_then(Value::as_str) {
-                data.state = state.into();
-                if terminal {
-                    data.completed_at = Some(Instant::now());
-                }
-            }
-        }
-        let entry = EventEntry {
-            id: data.next_event_id,
-            event: event.into(),
-            data: value,
-            terminal,
-        };
-        data.next_event_id += 1;
-        data.events.push(entry.clone());
-        entry
-    };
-    record.events.send(entry).ok();
+    let query = state
+        .service
+        .submit_stateless_query(&principal, &request.target, overrides, request.sql)
+        .map_err(service_error)?;
+    Ok((StatusCode::ACCEPTED, Json(query.into())))
 }
 
 #[utoipa::path(
@@ -1188,8 +834,13 @@ async fn get_query(
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(query_id): Path<String>,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    let record = record(&state, &principal, &query_id)?;
-    Ok(Json(query_response(record.as_ref())))
+    Ok(Json(
+        state
+            .service
+            .query(&principal, &query_id)
+            .map_err(service_error)?
+            .into(),
+    ))
 }
 
 #[utoipa::path(
@@ -1207,19 +858,11 @@ async fn cancel_query(
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Path(query_id): Path<String>,
 ) -> Result<(StatusCode, Json<QueryResponse>), ApiError> {
-    let record = record(&state, &principal, &query_id)?;
-    record.cancel.cancel();
-    audit(
-        &state,
-        "query.cancel",
-        "allowed",
-        Some(&principal),
-        Some(&record.target),
-        Some(&record.session_id),
-        Some(&record.id),
-    );
-    push_event(&record, "state", json!({ "state": "cancelling" }), false);
-    Ok((StatusCode::ACCEPTED, Json(query_response(&record))))
+    let status = state
+        .service
+        .cancel(&principal, &query_id)
+        .map_err(service_error)?;
+    Ok((StatusCode::ACCEPTED, Json(status.into())))
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -1251,37 +894,6 @@ async fn get_results(
     Query(query): Query<ResultsQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let record = record(&state, &principal, &query_id)?;
-    let (state_name, error, rows, source) = {
-        let data = record.data.lock().expect("query record mutex poisoned");
-        let source = match &data.storage {
-            ResultStorage::Memory(batches) => ResultSource::Memory(batches.clone()),
-            ResultStorage::Spill { path, writer } => {
-                if writer.is_some() {
-                    return Err(ApiError::new(
-                        StatusCode::CONFLICT,
-                        "query_running",
-                        "results are available after query completion",
-                    ));
-                }
-                ResultSource::Spill(path.clone())
-            }
-        };
-        (data.state.clone(), data.error.clone(), data.rows, source)
-    };
-    if let Some(error) = error {
-        return Err(ApiError {
-            status: StatusCode::UNPROCESSABLE_ENTITY,
-            body: error,
-        });
-    }
-    if !matches!(state_name.as_str(), "completed" | "cancelled" | "failed") {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "query_running",
-            "results are available after query completion",
-        ));
-    }
     let offset = query
         .page_token
         .as_deref()
@@ -1292,9 +904,13 @@ async fn get_results(
         .limit
         .unwrap_or(state.limits.default_page_rows)
         .clamp(1, state.limits.max_page_rows);
-    let end = offset.saturating_add(limit).min(rows);
-    let batches = load_page(source, offset, end)?;
-    let next = (end < rows).then(|| encode_page_token(end, state.page_secret));
+    let page = state
+        .service
+        .result_page(&principal, &query_id, offset, limit)
+        .map_err(service_error)?;
+    let next = page
+        .next_offset
+        .map(|offset| encode_page_token(offset, state.page_secret));
     let accept = headers
         .get(header::ACCEPT)
         .and_then(|value| value.to_str().ok())
@@ -1302,19 +918,19 @@ async fn get_results(
     let (content_type, bytes) = if accept.contains("application/vnd.apache.arrow.stream") {
         (
             "application/vnd.apache.arrow.stream",
-            render_arrow(&batches)?,
+            render_arrow(&page.batches)?,
         )
     } else if accept.contains("text/csv") {
-        ("text/csv", render_output(&batches, OutputFormat::Csv)?)
+        ("text/csv", render_output(&page.batches, OutputFormat::Csv)?)
     } else if accept.contains("application/x-ndjson") {
         (
             "application/x-ndjson",
-            render_output(&batches, OutputFormat::JsonLines)?,
+            render_output(&page.batches, OutputFormat::JsonLines)?,
         )
     } else {
         (
             "application/json",
-            render_output(&batches, OutputFormat::Json)?,
+            render_output(&page.batches, OutputFormat::Json)?,
         )
     };
     let mut response = Response::new(Body::from(bytes));
@@ -1355,22 +971,19 @@ async fn get_events(
     Path(query_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let record = record(&state, &principal, &query_id)?;
     let last = headers
         .get("last-event-id")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0);
-    let mut receiver = record.events.subscribe();
-    let history = record
-        .data
-        .lock()
-        .expect("query record mutex poisoned")
-        .events
-        .iter()
-        .filter(|entry| entry.id > last)
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut receiver = state
+        .service
+        .subscribe(&principal, &query_id)
+        .map_err(service_error)?;
+    let history = state
+        .service
+        .event_history(&principal, &query_id, last)
+        .map_err(service_error)?;
     let (sender, stream) = tokio::sync::mpsc::channel(32);
     tokio::spawn(async move {
         let mut seen = last;
@@ -1405,149 +1018,6 @@ async fn get_events(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-fn query_response(record: &QueryRecord) -> QueryResponse {
-    let data = record.data.lock().expect("query record mutex poisoned");
-    QueryResponse {
-        id: record.id.clone(),
-        session_id: record.session_id.clone(),
-        session_version: record.session_version,
-        target: record.target.clone(),
-        engine: record.engine.clone(),
-        engine_query_id: data.engine_query_id.clone(),
-        state: data.state.clone(),
-        rows: data.rows,
-        error: data.error.clone(),
-    }
-}
-
-fn record(
-    state: &AppState,
-    principal: &AuthenticatedPrincipal,
-    id: &str,
-) -> Result<Arc<QueryRecord>, ApiError> {
-    cleanup_expired(state);
-    let record = state
-        .records
-        .lock()
-        .expect("query registry mutex poisoned")
-        .get(id)
-        .cloned();
-    record
-        .filter(|record| record.owner == principal.id)
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "query_not_found", "query not found"))
-}
-
-fn target(
-    state: &AppState,
-    principal: &AuthenticatedPrincipal,
-    name: &str,
-) -> Result<ResolvedTarget, ApiError> {
-    if !principal.can_use_target(name) {
-        audit(
-            state,
-            "target.authorize",
-            "denied",
-            Some(principal),
-            Some(name),
-            None,
-            None,
-        );
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "target_forbidden",
-            format!("principal is not authorized for target '{name}'"),
-        ));
-    }
-    state.config.target(name).cloned().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::NOT_FOUND,
-            "target_not_found",
-            format!("target '{name}' does not exist"),
-        )
-    })
-}
-
-fn require_session_owner(
-    state: &AppState,
-    principal: &AuthenticatedPrincipal,
-    session_id: &str,
-) -> Result<(), ApiError> {
-    let owned = state
-        .session_owners
-        .lock()
-        .expect("session owner mutex poisoned")
-        .get_mut(session_id)
-        .is_some_and(|owner| {
-            if owner.principal == principal.id {
-                owner.last_access = Instant::now();
-                true
-            } else {
-                false
-            }
-        });
-    if owned {
-        Ok(())
-    } else {
-        Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "session_not_found",
-            "session not found",
-        ))
-    }
-}
-
-fn enforce_session_quota(
-    state: &AppState,
-    principal: &AuthenticatedPrincipal,
-) -> Result<(), ApiError> {
-    let count = state
-        .session_owners
-        .lock()
-        .expect("session owner mutex poisoned")
-        .values()
-        .filter(|owner| owner.principal == principal.id)
-        .count();
-    if count >= principal.max_sessions {
-        Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            "session_quota",
-            "principal session quota reached",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn enforce_query_quota(
-    state: &AppState,
-    principal: &AuthenticatedPrincipal,
-) -> Result<(), ApiError> {
-    let active = state
-        .records
-        .lock()
-        .expect("query registry mutex poisoned")
-        .values()
-        .filter(|record| {
-            record.owner == principal.id
-                && record
-                    .data
-                    .lock()
-                    .expect("query record mutex poisoned")
-                    .completed_at
-                    .is_none()
-        })
-        .count();
-    if active >= principal.max_concurrent_queries {
-        Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            "query_quota",
-            "principal concurrent-query quota reached",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
 fn values(values: BTreeMap<String, Value>) -> Result<BTreeMap<String, String>, ApiError> {
     values
         .into_iter()
@@ -1569,239 +1039,32 @@ fn values(values: BTreeMap<String, Value>) -> Result<BTreeMap<String, String>, A
         .collect()
 }
 
-fn core_error(error: &CoreError) -> ApiError {
-    let message = error.to_string();
-    let status = match error {
-        CoreError::SessionNotFound(_) => StatusCode::NOT_FOUND,
-        CoreError::VersionConflict { .. } => StatusCode::CONFLICT,
-        CoreError::AdapterNotFound(_) => StatusCode::BAD_REQUEST,
-        CoreError::Driver(_) | CoreError::Task(_) => StatusCode::BAD_GATEWAY,
-    };
-    ApiError::new(status, "core", message)
-}
-
-fn state_name(state: QueryState) -> &'static str {
-    match state {
-        QueryState::Submitted => "submitted",
-        QueryState::Running => "running",
-        QueryState::ProducingResults => "producing_results",
-        QueryState::Completed => "completed",
-        QueryState::Cancelling => "cancelling",
-        QueryState::Cancelled => "cancelled",
-        QueryState::Failed => "failed",
-    }
-}
-
-fn progress_json(progress: &QueryProgress) -> Value {
-    json!({
-        "state": progress.state,
-        "scheduled": progress.scheduled,
-        "completed_splits": progress.completed_splits,
-        "total_splits": progress.total_splits,
-        "processed_rows": progress.processed_rows,
-        "processed_bytes": progress.processed_bytes,
-        "elapsed_millis": progress.elapsed_millis,
-    })
-}
-
-fn store_batch(
-    query_id: &str,
-    data: &mut QueryData,
-    batch: RecordBatch,
-    limits: &HttpLimits,
-) -> Result<(), ApiErrorBody> {
-    let bytes = batch
-        .columns()
-        .iter()
-        .map(arrow_array::Array::get_array_memory_size)
-        .sum::<usize>();
-    let rows = batch.num_rows();
-    if data.retained_bytes.saturating_add(bytes) > limits.max_result_bytes_per_query {
-        return Err(ApiErrorBody {
-            code: "result_limit".into(),
-            message: format!(
-                "query result exceeds the local {}-byte retention limit",
-                limits.max_result_bytes_per_query
-            ),
-        });
-    }
-    if matches!(data.storage, ResultStorage::Memory(_))
-        && data.retained_bytes.saturating_add(bytes) > limits.memory_result_bytes_per_query
-    {
-        let path = std::env::temp_dir().join(format!("{query_id}-{}.arrow", Uuid::new_v4()));
-        let file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
-            .map_err(storage_error)?;
-        let mut writer =
-            FileWriter::try_new(file, batch.schema().as_ref()).map_err(storage_error)?;
-        if let ResultStorage::Memory(existing) =
-            std::mem::replace(&mut data.storage, ResultStorage::Memory(Vec::new()))
-        {
-            for existing_batch in &existing {
-                writer.write(existing_batch).map_err(storage_error)?;
+fn service_error(error: ServiceError) -> ApiError {
+    let status = match error.kind {
+        ServiceErrorKind::InvalidArgument => {
+            if error.code == "invalid_sql_size" {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
             }
         }
-        data.storage = ResultStorage::Spill {
-            path,
-            writer: Some(Box::new(writer)),
-        };
-    }
-    match &mut data.storage {
-        ResultStorage::Memory(batches) => batches.push(batch),
-        ResultStorage::Spill {
-            writer: Some(writer),
-            ..
-        } => writer.write(&batch).map_err(storage_error)?,
-        ResultStorage::Spill { writer: None, .. } => {
-            return Err(ApiErrorBody {
-                code: "result_storage".into(),
-                message: "result spill was already finalized".into(),
-            });
-        }
-    }
-    data.rows += rows;
-    data.retained_bytes += bytes;
-    Ok(())
-}
-
-fn finish_results(record: &QueryRecord) -> Result<(), ApiErrorBody> {
-    let mut data = record.data.lock().expect("query record mutex poisoned");
-    if let ResultStorage::Spill { writer, .. } = &mut data.storage
-        && let Some(mut writer) = writer.take()
-    {
-        writer.finish().map_err(storage_error)?;
-    }
-    Ok(())
-}
-
-fn storage_error(error: impl std::fmt::Display) -> ApiErrorBody {
-    ApiErrorBody {
-        code: "result_storage".into(),
-        message: error.to_string(),
-    }
-}
-
-enum ResultSource {
-    Memory(Vec<RecordBatch>),
-    Spill(PathBuf),
-}
-
-fn load_page(source: ResultSource, start: usize, end: usize) -> Result<Vec<RecordBatch>, ApiError> {
-    match source {
-        ResultSource::Memory(batches) => Ok(slice_batches(&batches, start, end)),
-        ResultSource::Spill(path) => {
-            let file = std::fs::File::open(path).map_err(arrow_error)?;
-            let reader = FileReader::try_new(file, None).map_err(arrow_error)?;
-            let mut cursor = 0;
-            let mut output = Vec::new();
-            for batch in reader {
-                let batch = batch.map_err(arrow_error)?;
-                let batch_end = cursor + batch.num_rows();
-                let overlap_start = start.max(cursor);
-                let overlap_end = end.min(batch_end);
-                if overlap_start < overlap_end {
-                    output.push(batch.slice(overlap_start - cursor, overlap_end - overlap_start));
-                }
-                cursor = batch_end;
-                if cursor >= end {
-                    break;
-                }
+        ServiceErrorKind::NotFound => StatusCode::NOT_FOUND,
+        ServiceErrorKind::Forbidden => StatusCode::FORBIDDEN,
+        ServiceErrorKind::Conflict => StatusCode::CONFLICT,
+        ServiceErrorKind::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
+        ServiceErrorKind::FailedPrecondition => {
+            if error.code == "shutting_down" {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else if error.code == "query_running" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
             }
-            Ok(output)
         }
-    }
-}
-
-fn cleanup_expired(state: &AppState) {
-    let now = Instant::now();
-    state
-        .records
-        .lock()
-        .expect("query registry mutex poisoned")
-        .retain(|_, record| {
-            record
-                .data
-                .lock()
-                .expect("query record mutex poisoned")
-                .completed_at
-                .is_none_or(|completed| now.duration_since(completed) < state.limits.result_ttl)
-        });
-    let expired_sessions = {
-        let owners = state
-            .session_owners
-            .lock()
-            .expect("session owner mutex poisoned");
-        owners
-            .iter()
-            .filter(|(_, owner)| now.duration_since(owner.last_access) >= state.limits.session_ttl)
-            .map(|(id, owner)| (id.clone(), owner.principal.clone()))
-            .collect::<Vec<_>>()
+        ServiceErrorKind::Upstream => StatusCode::BAD_GATEWAY,
+        ServiceErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    for (session_id, principal) in expired_sessions {
-        state
-            .records
-            .lock()
-            .expect("query registry mutex poisoned")
-            .values()
-            .filter(|record| record.session_id == session_id)
-            .for_each(|record| record.cancel.cancel());
-        state.sessions.close(&session_id).ok();
-        state
-            .session_owners
-            .lock()
-            .expect("session owner mutex poisoned")
-            .remove(&session_id);
-        state.audit.record(&AuditEvent {
-            action: "session.expire".into(),
-            outcome: "cancelled_active_queries".into(),
-            principal: Some(principal),
-            target: None,
-            session_id: Some(session_id),
-            query_id: None,
-        });
-    }
-}
-
-fn cancel_active_queries(state: &AppState) {
-    state
-        .records
-        .lock()
-        .expect("query registry mutex poisoned")
-        .values()
-        .filter(|record| {
-            record
-                .data
-                .lock()
-                .expect("query record mutex poisoned")
-                .completed_at
-                .is_none()
-        })
-        .for_each(|record| record.cancel.cancel());
-}
-
-async fn wait_for_queries(state: &AppState) {
-    let deadline = tokio::time::Instant::now() + state.limits.shutdown_grace;
-    loop {
-        let active = state
-            .records
-            .lock()
-            .expect("query registry mutex poisoned")
-            .values()
-            .any(|record| {
-                record
-                    .data
-                    .lock()
-                    .expect("query record mutex poisoned")
-                    .completed_at
-                    .is_none()
-            });
-        if !active || tokio::time::Instant::now() >= deadline {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    ApiError::new(status, error.code, error.message)
 }
 
 fn audit(
@@ -1813,32 +1076,9 @@ fn audit(
     session_id: Option<&str>,
     query_id: Option<&str>,
 ) {
-    state.audit.record(&AuditEvent {
-        action: action.into(),
-        outcome: outcome.into(),
-        principal: principal.map(|value| value.id.clone()),
-        target: target.map(str::to_owned),
-        session_id: session_id.map(str::to_owned),
-        query_id: query_id.map(str::to_owned),
-    });
-}
-
-fn slice_batches(batches: &[RecordBatch], start: usize, end: usize) -> Vec<RecordBatch> {
-    let mut cursor = 0;
-    let mut output = Vec::new();
-    for batch in batches {
-        let batch_end = cursor + batch.num_rows();
-        let overlap_start = start.max(cursor);
-        let overlap_end = end.min(batch_end);
-        if overlap_start < overlap_end {
-            output.push(batch.slice(overlap_start - cursor, overlap_end - overlap_start));
-        }
-        cursor = batch_end;
-        if cursor >= end {
-            break;
-        }
-    }
-    output
+    state
+        .service
+        .audit(action, outcome, principal, target, session_id, query_id);
 }
 
 fn render_output(batches: &[RecordBatch], format: OutputFormat) -> Result<Vec<u8>, ApiError> {
@@ -1952,6 +1192,7 @@ mod tests {
     use axum::body::to_bytes;
     use axum::http::Request;
     use qcli_driver_demo::DemoAdapter;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tower::ServiceExt;
 
@@ -2300,7 +1541,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_and_direct_core_machine_results_match() {
+    async fn http_and_direct_service_machine_results_match() {
         let service = service(HttpLimits::default());
         let router = service.router();
         let response = router
@@ -2327,19 +1568,36 @@ mod tests {
             .unwrap();
         let http = to_bytes(response.into_body(), usize::MAX).await.unwrap();
 
-        let sessions = SessionManager::default();
-        let snapshot = sessions.create(service.state.config.target("demo").unwrap().clone());
-        let queries = QueryService::new([Arc::new(DemoAdapter) as Arc<dyn EngineAdapter>], 8);
-        let mut handle = queries
-            .submit(snapshot, "select * from sample".into())
+        let principal = AuthenticatedPrincipal {
+            id: "local".into(),
+            allowed_targets: ["*".into()].into_iter().collect(),
+            max_sessions: usize::MAX,
+            max_concurrent_queries: usize::MAX,
+        };
+        let direct_query = service
+            .gateway()
+            .submit_stateless_query(
+                &principal,
+                "demo",
+                BTreeMap::new(),
+                "select * from sample".into(),
+            )
             .unwrap();
-        let mut batches = Vec::new();
-        while let Some(batch) = handle.next_batch().await {
-            batches.push(batch);
+        loop {
+            let status = service
+                .gateway()
+                .query(&principal, &direct_query.id)
+                .unwrap();
+            if matches!(status.state.as_str(), "completed" | "failed" | "cancelled") {
+                break;
+            }
+            tokio::task::yield_now().await;
         }
-        while handle.next_event().await.is_some() {}
-        handle.finish().await.unwrap();
-        let direct = render_output(&batches, OutputFormat::Json).unwrap();
+        let page = service
+            .gateway()
+            .result_page(&principal, &direct_query.id, 0, usize::MAX)
+            .unwrap();
+        let direct = render_output(&page.batches, OutputFormat::Json).unwrap();
         assert_eq!(http.as_ref(), direct);
     }
 
@@ -2421,24 +1679,6 @@ mod tests {
         let terminal = wait_for_terminal(&router, query_id).await;
         assert_eq!(terminal["state"], "completed");
 
-        let record = service
-            .state
-            .records
-            .lock()
-            .unwrap()
-            .get(query_id)
-            .unwrap()
-            .clone();
-        let spill_path = {
-            let data = record.data.lock().unwrap();
-            let ResultStorage::Spill { path, writer } = &data.storage else {
-                panic!("result did not spill");
-            };
-            assert!(writer.is_none());
-            path.clone()
-        };
-        assert!(spill_path.exists());
-
         let response = router
             .clone()
             .oneshot(
@@ -2457,10 +1697,6 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-
-        service.state.records.lock().unwrap().remove(query_id);
-        drop(record);
-        assert!(!spill_path.exists());
     }
 
     #[tokio::test]
@@ -2498,7 +1734,7 @@ mod tests {
     #[tokio::test]
     async fn expired_results_are_removed_on_access() {
         let limits = HttpLimits {
-            result_ttl: Duration::from_secs(60),
+            result_ttl: Duration::from_millis(1),
             ..HttpLimits::default()
         };
         let service = service(limits);
@@ -2515,17 +1751,7 @@ mod tests {
         let query = json_body(response).await;
         let query_id = query["id"].as_str().unwrap();
         wait_for_terminal(&router, query_id).await;
-        let record = service
-            .state
-            .records
-            .lock()
-            .unwrap()
-            .get(query_id)
-            .unwrap()
-            .clone();
-        record.data.lock().unwrap().completed_at =
-            Some(Instant::now().checked_sub(Duration::from_secs(61)).unwrap());
-        drop(record);
+        tokio::time::sleep(Duration::from_millis(5)).await;
 
         let expired = router
             .clone()
@@ -2642,7 +1868,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_expires_sessions_and_audit_omits_sql() {
         let limits = HttpLimits {
-            session_ttl: Duration::from_secs(60),
+            session_ttl: Duration::from_millis(1),
             ..HttpLimits::default()
         };
         let audit = Arc::new(MemoryAuditSink::default());
@@ -2660,16 +1886,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::ACCEPTED);
-        service
-            .state
-            .session_owners
-            .lock()
-            .unwrap()
-            .get_mut(session_id)
-            .unwrap()
-            .last_access = Instant::now().checked_sub(Duration::from_secs(61)).unwrap();
-        cleanup_expired(&service.state);
-        assert!(service.state.sessions.snapshot(session_id).is_err());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        service.gateway().cleanup_expired();
+        let principal = AuthenticatedPrincipal {
+            id: "local".into(),
+            allowed_targets: ["*".into()].into_iter().collect(),
+            max_sessions: usize::MAX,
+            max_concurrent_queries: usize::MAX,
+        };
+        assert!(service.gateway().session(&principal, session_id).is_err());
         let encoded = serde_json::to_string(&*audit.0.lock().unwrap()).unwrap();
         assert!(encoded.contains("query.submit"));
         assert!(!encoded.contains("never-audit-this-sql"));

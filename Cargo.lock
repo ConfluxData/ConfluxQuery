@@ -2064,6 +2064,7 @@ dependencies = [
  "qcli-driver-api",
  "qcli-driver-demo",
  "qcli-output",
+ "qcli-service",
  "serde",
  "serde_json",
  "tokio",
@@ -2107,6 +2108,23 @@ dependencies = [
  "rustyline",
  "signal-hook",
  "tokio",
+]
+
+[[package]]
+name = "qcli-service"
+version = "0.1.0"
+dependencies = [
+ "arrow-array 59.1.0",
+ "arrow-ipc 59.1.0",
+ "qcli-auth",
+ "qcli-config",
+ "qcli-core",
+ "qcli-driver-api",
+ "qcli-driver-demo",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

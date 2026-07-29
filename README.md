@@ -74,15 +74,9 @@ The project is under sequenced implementation. See the [product design](docs/pro
 
 ## Current milestone
 
-Milestone 1 provides configuration validation and target discovery:
-
-```text
-qcli config path
-qcli config check
-qcli config show
-qcli target list
-qcli target show TARGET
-```
+Milestone 13 provides the shared protocol-neutral gateway service used by HTTP
+and the upcoming Flight SQL frontend. See the
+[Milestone 13 notes](docs/milestones/milestone-13-notes.md).
 
 ## Build
 

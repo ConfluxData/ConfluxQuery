@@ -16,6 +16,7 @@ packages=(
   qcli-driver-snowflake
   qcli-driver-trino
   qcli-repl
+  qcli-service
   qcli-http
   qcli
 )
