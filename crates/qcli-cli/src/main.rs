@@ -1,4 +1,6 @@
-use qcli_auth::{ApiKeyAuthenticator, AuthenticationError, generate_api_key_material};
+use qcli_auth::{
+    ApiKeyAuthenticator, AuthenticationError, Authenticator, generate_api_key_material,
+};
 use qcli_config::{Config, ConfigError, ResolvedTarget, default_config_path};
 use qcli_core::{CoreError, QueryService, SessionManager};
 use qcli_driver_api::{AdapterCapability, EngineAdapter, QueryEvent};
@@ -6,9 +8,13 @@ use qcli_driver_databricks::DatabricksAdapter;
 use qcli_driver_demo::DemoAdapter;
 use qcli_driver_snowflake::SnowflakeAdapter;
 use qcli_driver_trino::TrinoAdapter;
+use qcli_flight_sql::{
+    FlightServerConfig, FlightServerError, FlightTlsConfig, bind_flight, serve_flight,
+};
 use qcli_http::{HttpLimits, HttpOperations, HttpService, bind_http, stderr_audit_sink};
 use qcli_output::{DisplayOptions, OutputError, OutputFormat, StreamOutput};
 use qcli_repl::ReplError;
+use qcli_service::{GatewayService, ServiceLimits};
 use std::env;
 use std::fmt;
 use std::fs;
@@ -28,6 +34,7 @@ enum AppError {
     Output(OutputError),
     Repl(ReplError),
     Server(io::Error),
+    Flight(FlightServerError),
     Authentication(AuthenticationError),
 }
 
@@ -47,7 +54,7 @@ impl AppError {
             Self::Query(_) => 5,
             Self::Output(_) => 7,
             Self::Repl(_) => 6,
-            Self::Server(_) => 8,
+            Self::Server(_) | Self::Flight(_) => 8,
             Self::Authentication(_) => 9,
         }
     }
@@ -67,6 +74,7 @@ impl fmt::Display for AppError {
             Self::Output(error) => write!(f, "could not write query results: {error}"),
             Self::Repl(error) => write!(f, "interactive terminal failed: {error}"),
             Self::Server(error) => write!(f, "HTTP service failed: {error}"),
+            Self::Flight(error) => write!(f, "Flight SQL service failed: {error}"),
             Self::Authentication(error) => write!(f, "authentication failed: {error}"),
         }
     }
@@ -99,6 +107,12 @@ impl From<ReplError> for AppError {
 impl From<AuthenticationError> for AppError {
     fn from(value: AuthenticationError) -> Self {
         Self::Authentication(value)
+    }
+}
+
+impl From<FlightServerError> for AppError {
+    fn from(value: FlightServerError) -> Self {
+        Self::Flight(value)
     }
 }
 
@@ -144,7 +158,7 @@ async fn run(args: Vec<String>) -> Result<(), AppError> {
             .map_err(Into::into);
     }
     if command.first().is_some_and(|value| value == "serve") {
-        return serve_http(&config_path, parse_serve_args(&command[1..])?).await;
+        return serve_gateway(&config_path, parse_serve_args(&command[1..])?).await;
     }
     match command.as_slice() {
         [version] if version == "--version" || version == "-V" => {
@@ -213,16 +227,24 @@ fn create_api_key(key_id: &str) -> Result<(), AppError> {
 
 struct ServeArguments {
     address: String,
+    flight_address: Option<String>,
     auth_file: Option<PathBuf>,
     trusted_proxy: bool,
+    flight_trusted_proxy: bool,
+    flight_tls_certificate: Option<PathBuf>,
+    flight_tls_private_key: Option<PathBuf>,
     allowed_origins: Vec<String>,
 }
 
 fn parse_serve_args(arguments: &[String]) -> Result<ServeArguments, AppError> {
     let mut result = ServeArguments {
         address: "127.0.0.1:8088".into(),
+        flight_address: None,
         auth_file: None,
         trusted_proxy: false,
+        flight_trusted_proxy: false,
+        flight_tls_certificate: None,
+        flight_tls_private_key: None,
         allowed_origins: Vec::new(),
     };
     let mut index = 0;
@@ -232,13 +254,25 @@ fn parse_serve_args(arguments: &[String]) -> Result<ServeArguments, AppError> {
                 result.trusted_proxy = true;
                 index += 1;
             }
-            "--bind" | "--auth-file" | "--cors-origin" => {
+            "--flight-trusted-proxy" if !result.flight_trusted_proxy => {
+                result.flight_trusted_proxy = true;
+                index += 1;
+            }
+            "--bind" | "--flight-bind" | "--flight-tls-cert" | "--flight-tls-key"
+            | "--auth-file" | "--cors-origin" => {
                 let flag = &arguments[index];
                 let value = arguments
                     .get(index + 1)
                     .ok_or_else(|| AppError::Usage(format!("{flag} requires a value")))?;
                 match flag.as_str() {
                     "--bind" => result.address.clone_from(value),
+                    "--flight-bind" => result.flight_address = Some(value.clone()),
+                    "--flight-tls-cert" => {
+                        result.flight_tls_certificate = Some(PathBuf::from(value));
+                    }
+                    "--flight-tls-key" => {
+                        result.flight_tls_private_key = Some(PathBuf::from(value));
+                    }
                     "--auth-file" => result.auth_file = Some(PathBuf::from(value)),
                     "--cors-origin" => result.allowed_origins.push(value.clone()),
                     _ => unreachable!(),
@@ -251,25 +285,72 @@ fn parse_serve_args(arguments: &[String]) -> Result<ServeArguments, AppError> {
     Ok(result)
 }
 
-async fn serve_http(path: &Path, arguments: ServeArguments) -> Result<(), AppError> {
+fn flight_server_config(
+    arguments: &ServeArguments,
+    has_authenticator: bool,
+) -> Result<(Option<std::net::SocketAddr>, FlightServerConfig), AppError> {
+    let address = arguments
+        .flight_address
+        .as_deref()
+        .map(str::parse::<std::net::SocketAddr>)
+        .transpose()
+        .map_err(|error| AppError::Usage(format!("invalid Flight bind address: {error}")))?;
+    let tls = match (
+        &arguments.flight_tls_certificate,
+        &arguments.flight_tls_private_key,
+    ) {
+        (Some(certificate), Some(private_key)) => Some(FlightTlsConfig {
+            certificate: certificate.clone(),
+            private_key: private_key.clone(),
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(AppError::Usage(
+                "--flight-tls-cert and --flight-tls-key must be supplied together".into(),
+            ));
+        }
+    };
+    if address.is_some() && !has_authenticator {
+        return Err(AppError::Usage("--flight-bind requires --auth-file".into()));
+    }
+    Ok((
+        address,
+        FlightServerConfig {
+            trusted_proxy: arguments.flight_trusted_proxy,
+            tls,
+            ..FlightServerConfig::default()
+        },
+    ))
+}
+
+async fn serve_gateway(path: &Path, arguments: ServeArguments) -> Result<(), AppError> {
     let address = arguments.address.parse().map_err(|error| {
         AppError::Usage(format!(
             "invalid HTTP bind address '{}': {error}",
             arguments.address
         ))
     })?;
-    let authenticator = arguments
+    let authenticator: Option<Arc<dyn Authenticator>> = arguments
         .auth_file
         .as_deref()
         .map(ApiKeyAuthenticator::load)
-        .transpose()?;
+        .transpose()?
+        .map(|value| Arc::new(value) as Arc<dyn Authenticator>);
+    let (flight, flight_config) = flight_server_config(&arguments, authenticator.is_some())?;
     let listener = bind_http(address, arguments.trusted_proxy, authenticator.is_some())
         .await
         .map_err(AppError::Server)?;
-    let mut service = HttpService::new(Config::load(path)?, adapters(), HttpLimits::default());
-    if let Some(authenticator) = authenticator {
+    let flight_listener = if let Some(flight_address) = flight {
+        Some(bind_flight(flight_address, &flight_config).await?)
+    } else {
+        None
+    };
+
+    let gateway = GatewayService::new(Config::load(path)?, adapters(), ServiceLimits::default());
+    let mut service = HttpService::from_gateway(gateway.clone(), HttpLimits::default());
+    if let Some(authenticator) = &authenticator {
         service = service
-            .with_authenticator(Arc::new(authenticator))
+            .with_authenticator(authenticator.clone())
             .with_audit_sink(stderr_audit_sink());
     }
     service = service.with_operations(HttpOperations {
@@ -277,12 +358,49 @@ async fn serve_http(path: &Path, arguments: ServeArguments) -> Result<(), AppErr
         allowed_origins: arguments.allowed_origins,
     });
     eprintln!("qcli HTTP service listening on http://{address}");
-    service
-        .serve_with_shutdown(listener, async {
-            tokio::signal::ctrl_c().await.ok();
-        })
+    let Some(flight_listener) = flight_listener else {
+        return service
+            .serve_with_shutdown(listener, async {
+                tokio::signal::ctrl_c().await.ok();
+            })
+            .await
+            .map_err(AppError::Server);
+    };
+    let flight_address = flight_listener.local_addr().map_err(AppError::Server)?;
+    eprintln!("qcli Flight SQL service listening on {flight_address}");
+    let authenticator = authenticator.expect("Flight authentication was validated");
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+    let mut http_shutdown = shutdown_tx.subscribe();
+    let mut flight_shutdown = shutdown_tx.subscribe();
+    let signal_gateway = gateway.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        signal_gateway.begin_shutdown();
+        shutdown_tx.send(()).ok();
+    });
+    let http = async move {
+        service
+            .serve_with_shutdown(listener, async move {
+                http_shutdown.recv().await.ok();
+            })
+            .await
+            .map_err(AppError::Server)
+    };
+    let flight = async move {
+        serve_flight(
+            flight_listener,
+            gateway,
+            authenticator,
+            flight_config,
+            async move {
+                flight_shutdown.recv().await.ok();
+            },
+        )
         .await
-        .map_err(AppError::Server)
+        .map_err(AppError::Flight)
+    };
+    tokio::try_join!(http, flight)?;
+    Ok(())
 }
 
 struct QueryArguments {
@@ -559,4 +677,121 @@ fn print_help() {
     println!(
         "  serve [--bind ADDRESS] [--auth-file PATH] [--trusted-proxy] [--cors-origin ORIGIN]"
     );
+    println!("        [--flight-bind ADDRESS] [--flight-tls-cert PATH --flight-tls-key PATH]");
+    println!("        [--flight-trusted-proxy]");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    struct TestAuthenticator;
+
+    impl Authenticator for TestAuthenticator {
+        fn authenticate_immediate(
+            &self,
+            _bearer: &str,
+        ) -> Result<qcli_auth::AuthenticatedPrincipal, AuthenticationError> {
+            Ok(qcli_auth::AuthenticatedPrincipal {
+                id: "test".into(),
+                allowed_targets: BTreeSet::from(["demo".into()]),
+                max_sessions: 2,
+                max_concurrent_queries: 2,
+            })
+        }
+    }
+
+    #[test]
+    fn flight_serve_arguments_are_explicit_and_complete() {
+        let arguments = parse_serve_args(&[
+            "--flight-bind".into(),
+            "127.0.0.1:32010".into(),
+            "--auth-file".into(),
+            "auth.toml".into(),
+            "--flight-tls-cert".into(),
+            "server.pem".into(),
+            "--flight-tls-key".into(),
+            "server.key".into(),
+        ])
+        .unwrap();
+        assert_eq!(arguments.flight_address.as_deref(), Some("127.0.0.1:32010"));
+        assert_eq!(
+            arguments.flight_tls_certificate.as_deref(),
+            Some(Path::new("server.pem"))
+        );
+        assert_eq!(
+            arguments.flight_tls_private_key.as_deref(),
+            Some(Path::new("server.key"))
+        );
+        let (_, config) = flight_server_config(&arguments, true).unwrap();
+        assert!(config.tls.is_some());
+    }
+
+    #[test]
+    fn flight_listener_requires_auth_and_complete_tls_identity() {
+        let no_auth =
+            parse_serve_args(&["--flight-bind".into(), "127.0.0.1:32010".into()]).unwrap();
+        assert!(flight_server_config(&no_auth, false).is_err());
+
+        let incomplete_tls = parse_serve_args(&[
+            "--flight-bind".into(),
+            "127.0.0.1:32010".into(),
+            "--flight-tls-cert".into(),
+            "server.pem".into(),
+        ])
+        .unwrap();
+        assert!(flight_server_config(&incomplete_tls, true).is_err());
+    }
+
+    #[tokio::test]
+    async fn http_and_flight_start_and_shutdown_on_one_runtime() {
+        let path = std::env::temp_dir().join(format!("qcli-m14-{}.env", std::process::id()));
+        std::fs::write(&path, "[demo]\nengine=demo\n").unwrap();
+        let gateway = GatewayService::new(
+            Config::load(&path).unwrap(),
+            [Arc::new(DemoAdapter) as Arc<dyn EngineAdapter>],
+            ServiceLimits::default(),
+        );
+        std::fs::remove_file(path).ok();
+
+        let http_listener = bind_http("127.0.0.1:0".parse().unwrap(), false, false)
+            .await
+            .unwrap();
+        let http_address = http_listener.local_addr().unwrap();
+        let flight_config = FlightServerConfig::default();
+        let flight_listener = bind_flight("127.0.0.1:0".parse().unwrap(), &flight_config)
+            .await
+            .unwrap();
+        let flight_address = flight_listener.local_addr().unwrap();
+        let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel();
+        let (flight_shutdown_tx, flight_shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let http_gateway = gateway.clone();
+        let http = tokio::spawn(async move {
+            HttpService::from_gateway(http_gateway, HttpLimits::default())
+                .serve_with_shutdown(http_listener, async {
+                    http_shutdown_rx.await.ok();
+                })
+                .await
+        });
+        let flight = tokio::spawn(serve_flight(
+            flight_listener,
+            gateway,
+            Arc::new(TestAuthenticator),
+            flight_config,
+            async {
+                flight_shutdown_rx.await.ok();
+            },
+        ));
+
+        tokio::net::TcpStream::connect(http_address).await.unwrap();
+        tokio::net::TcpStream::connect(flight_address)
+            .await
+            .unwrap();
+        http_shutdown_tx.send(()).unwrap();
+        flight_shutdown_tx.send(()).unwrap();
+        http.await.unwrap().unwrap();
+        flight.await.unwrap().unwrap();
+    }
 }

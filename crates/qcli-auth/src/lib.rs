@@ -106,10 +106,29 @@ impl std::error::Error for AuthenticationError {}
 /// Extensible boundary shared by opaque API keys and future JWT/OIDC providers.
 #[async_trait]
 pub trait Authenticator: Send + Sync {
+    /// Authenticate without external I/O for synchronous transport
+    /// interceptors. Providers that require asynchronous discovery or token
+    /// exchange may reject this path and override [`Self::authenticate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified missing, invalid, or provider-configuration error.
+    fn authenticate_immediate(
+        &self,
+        _bearer: &str,
+    ) -> Result<AuthenticatedPrincipal, AuthenticationError> {
+        Err(AuthenticationError {
+            kind: AuthenticationErrorKind::Configuration,
+            message: "authentication provider does not support immediate validation".into(),
+        })
+    }
+
     async fn authenticate(
         &self,
         bearer: &str,
-    ) -> Result<AuthenticatedPrincipal, AuthenticationError>;
+    ) -> Result<AuthenticatedPrincipal, AuthenticationError> {
+        self.authenticate_immediate(bearer)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,7 +228,7 @@ impl ApiKeyAuthenticator {
 
 #[async_trait]
 impl Authenticator for ApiKeyAuthenticator {
-    async fn authenticate(
+    fn authenticate_immediate(
         &self,
         bearer: &str,
     ) -> Result<AuthenticatedPrincipal, AuthenticationError> {

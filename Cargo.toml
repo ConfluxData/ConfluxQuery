@@ -10,6 +10,7 @@ members = [
     "crates/qcli-driver-demo",
     "crates/qcli-driver-snowflake",
     "crates/qcli-driver-trino",
+    "crates/qcli-flight-sql",
     "crates/qcli-http",
     "crates/qcli-metadata",
     "crates/qcli-output",
@@ -31,12 +32,14 @@ arrow-csv = "59.1.0"
 arrow-json = "59.1.0"
 arrow-ipc = "59.1.0"
 arrow-schema = "59.1.0"
+arrow-flight = { version = "59.1.0", features = ["flight-sql", "tls-ring"] }
 async-trait = "0.1.91"
 axum = "0.8.4"
 argon2 = "0.5.3"
 base64 = "0.22.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 futures-util = "0.3"
+prost = "0.14.4"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
@@ -45,6 +48,8 @@ signal-hook = "0.3.18"
 snowflakedb-rs = { version = "1.1.7", features = ["arrow", "chrono", "decimal", "reqwest"] }
 rustyline = { version = "18.0.1", default-features = false, features = ["custom-bindings", "derive", "with-file-history"] }
 tokio = { version = "1.53.0", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tonic = { version = "0.14.2", features = ["transport", "tls-ring"] }
+tonic-health = "0.14.2"
 tower = "0.5.2"
 trino-rust-client = "0.11.0"
 url = "2.5"

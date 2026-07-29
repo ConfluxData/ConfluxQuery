@@ -152,11 +152,6 @@ impl HttpService {
         adapters: impl IntoIterator<Item = Arc<dyn EngineAdapter>>,
         limits: HttpLimits,
     ) -> Self {
-        let uuid = Uuid::new_v4();
-        let bytes = uuid.as_bytes();
-        let page_secret = u64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]);
         let service_limits = ServiceLimits {
             max_queries: limits.max_queries,
             memory_result_bytes_per_query: limits.memory_result_bytes_per_query,
@@ -166,9 +161,22 @@ impl HttpService {
             session_ttl: limits.session_ttl,
             shutdown_grace: limits.shutdown_grace,
         };
+        Self::from_gateway(
+            GatewayService::new(config, adapters, service_limits),
+            limits,
+        )
+    }
+
+    #[must_use]
+    pub fn from_gateway(service: GatewayService, limits: HttpLimits) -> Self {
+        let uuid = Uuid::new_v4();
+        let bytes = uuid.as_bytes();
+        let page_secret = u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]);
         Self {
             state: AppState {
-                service: GatewayService::new(config, adapters, service_limits),
+                service,
                 limits,
                 page_secret,
                 authenticator: None,

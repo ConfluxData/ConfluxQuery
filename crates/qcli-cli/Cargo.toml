@@ -15,9 +15,11 @@ qcli-driver-demo = { version = "0.1.0", path = "../qcli-driver-demo" }
 qcli-driver-databricks = { version = "0.1.0", path = "../qcli-driver-databricks" }
 qcli-driver-snowflake = { version = "0.1.0", path = "../qcli-driver-snowflake" }
 qcli-driver-trino = { version = "0.1.0", path = "../qcli-driver-trino" }
+qcli-flight-sql = { version = "0.1.0", path = "../qcli-flight-sql" }
 qcli-http = { version = "0.1.0", path = "../qcli-http" }
 qcli-output = { version = "0.1.0", path = "../qcli-output" }
 qcli-repl = { version = "0.1.0", path = "../qcli-repl" }
+qcli-service = { version = "0.1.0", path = "../qcli-service" }
 tokio.workspace = true
 
 [lints]

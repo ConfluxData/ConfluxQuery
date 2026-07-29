@@ -17,6 +17,7 @@ packages=(
   qcli-driver-trino
   qcli-repl
   qcli-service
+  qcli-flight-sql
   qcli-http
   qcli
 )

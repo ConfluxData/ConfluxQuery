@@ -64,6 +64,31 @@ quotas. Non-loopback operation additionally requires `--trusted-proxy`; see the
 [Milestone 11 notes](docs/milestones/milestone-11-notes.md) for proxy TLS,
 CORS, audit, expiry, and shutdown requirements.
 
+Enable the authenticated Flight SQL endpoint alongside HTTP:
+
+```text
+qcli serve \
+  --auth-file ~/.qcli/http-auth.toml \
+  --flight-bind 127.0.0.1:32010
+```
+
+Milestone 14 supports Flight SQL health, discovery, and honest minimal
+`GetSqlInfo`. Statement execution is deliberately reported as unsupported until
+Milestone 15. Non-loopback Flight SQL requires either direct TLS:
+
+```text
+qcli serve \
+  --auth-file ~/.qcli/http-auth.toml \
+  --flight-bind 0.0.0.0:32010 \
+  --flight-tls-cert /path/to/server-chain.pem \
+  --flight-tls-key /path/to/server-key.pem
+```
+
+or explicit `--flight-trusted-proxy`, in which case the trusted gRPC proxy must
+supply `x-forwarded-proto: https`. See the
+[Milestone 14 notes](docs/milestones/milestone-14-notes.md) for the protocol,
+security, and client contract.
+
 The versioned API creates persistent sessions, submits asynchronous session or
 stateless queries, reports status, streams SSE events, cancels work, and returns
 paginated JSON, NDJSON, CSV, or Arrow-stream results. See the
@@ -74,9 +99,9 @@ The project is under sequenced implementation. See the [product design](docs/pro
 
 ## Current milestone
 
-Milestone 13 provides the shared protocol-neutral gateway service used by HTTP
-and the upcoming Flight SQL frontend. See the
-[Milestone 13 notes](docs/milestones/milestone-13-notes.md).
+Milestone 14 provides an authenticated Flight SQL foundation and secure
+listener within global `qcli serve`. See the
+[Milestone 14 notes](docs/milestones/milestone-14-notes.md).
 
 ## Build
 
