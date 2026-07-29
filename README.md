@@ -72,10 +72,12 @@ qcli serve \
   --flight-bind 127.0.0.1:32010
 ```
 
-Milestone 15 supports Flight SQL statement execution and bounded Arrow result
-streaming. Clients authenticate with the same bearer API key used by HTTP and
-send the target name as `qcli-target` gRPC metadata. The returned query ticket
-is opaque, signed, principal-bound, expiring, and replayable while retained.
+Milestone 16 supports standard Flight session actions in addition to statement
+execution and bounded Arrow result streaming. Clients may create a session with
+`SetSessionOptions` and `qcli.target`, then rely on the standard
+`arrow_flight_session_id` cookie instead of sending `qcli-target` on every
+request. Stateless clients may continue to use that metadata. Query tickets are
+opaque, signed, principal-bound, expiring, and replayable while retained.
 Non-loopback Flight SQL requires either direct TLS:
 
 ```text
@@ -88,7 +90,7 @@ qcli serve \
 
 or explicit `--flight-trusted-proxy`, in which case the trusted gRPC proxy must
 supply `x-forwarded-proto: https`. See the
-[Milestone 15 notes](docs/milestones/milestone-15-notes.md) for the protocol,
+[Milestone 16 notes](docs/milestones/milestone-16-notes.md) for the protocol,
 security, and client contract.
 
 The versioned API creates persistent sessions, submits asynchronous session or
@@ -101,10 +103,9 @@ The project is under sequenced implementation. See the [product design](docs/pro
 
 ## Current milestone
 
-Milestone 15 provides authenticated Flight SQL query submission, exact Arrow
-schemas, bounded streaming, cancellation, and retained-result replay within
-global `qcli serve`. See the
-[Milestone 15 notes](docs/milestones/milestone-15-notes.md).
+Milestone 16 provides authenticated, versioned Flight sessions shared with the
+gateway’s HTTP session state. See the
+[Milestone 16 notes](docs/milestones/milestone-16-notes.md).
 
 ## Build
 

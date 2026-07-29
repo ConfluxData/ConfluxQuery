@@ -376,12 +376,38 @@ impl GatewayService {
             .map_err(|error| core_error(&error))
     }
 
+    pub fn mutate_session(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        session_id: &str,
+        expected_version: u64,
+        target_name: Option<&str>,
+        overrides: BTreeMap<String, Option<String>>,
+    ) -> Result<SessionSnapshot, ServiceError> {
+        self.ensure_available()?;
+        self.require_session_owner(principal, session_id)?;
+        let target = target_name
+            .map(|name| self.authorized_target(principal, name))
+            .transpose()?;
+        self.state
+            .sessions
+            .mutate(session_id, expected_version, target, overrides)
+            .map_err(|error| core_error(&error))
+    }
+
     pub fn close_session(
         &self,
         principal: &AuthenticatedPrincipal,
         session_id: &str,
     ) -> Result<(), ServiceError> {
         self.require_session_owner(principal, session_id)?;
+        self.state
+            .records
+            .lock()
+            .expect("query registry mutex poisoned")
+            .values()
+            .filter(|record| record.session_id == session_id)
+            .for_each(|record| record.cancel.cancel());
         self.state
             .sessions
             .close(session_id)

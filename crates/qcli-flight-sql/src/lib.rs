@@ -10,7 +10,8 @@ use arrow_flight::sql::{
     ProstMessageExt, SqlInfo, SqlSupportedTransaction, TicketStatementQuery,
 };
 use arrow_flight::{
-    FlightDescriptor, FlightEndpoint, FlightInfo, HandshakeRequest, HandshakeResponse, Ticket,
+    Action, ActionType, FlightDescriptor, FlightEndpoint, FlightInfo, HandshakeRequest,
+    HandshakeResponse, Result as FlightActionResult, Ticket,
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -38,6 +39,97 @@ use tonic::{Request, Response, Status, Streaming};
 use uuid::Uuid;
 
 pub const FLIGHT_SERVICE_NAME: &str = "arrow.flight.protocol.FlightService";
+const SESSION_COOKIE: &str = "arrow_flight_session_id";
+const SET_SESSION_OPTIONS: &str = "SetSessionOptions";
+const GET_SESSION_OPTIONS: &str = "GetSessionOptions";
+const CLOSE_SESSION: &str = "CloseSession";
+
+mod session_proto {
+    use std::collections::HashMap;
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct SessionOptionValue {
+        #[prost(oneof = "session_option_value::OptionValue", tags = "1, 2, 3, 4, 5")]
+        pub option_value: Option<session_option_value::OptionValue>,
+    }
+
+    pub mod session_option_value {
+        #[derive(Clone, PartialEq, prost::Message)]
+        pub struct StringListValue {
+            #[prost(string, repeated, tag = "1")]
+            pub values: Vec<String>,
+        }
+
+        #[derive(Clone, PartialEq, prost::Oneof)]
+        #[allow(clippy::enum_variant_names)]
+        pub enum OptionValue {
+            #[prost(string, tag = "1")]
+            StringValue(String),
+            #[prost(bool, tag = "2")]
+            BoolValue(bool),
+            #[prost(sfixed64, tag = "3")]
+            Int64Value(i64),
+            #[prost(double, tag = "4")]
+            DoubleValue(f64),
+            #[prost(message, tag = "5")]
+            StringListValue(StringListValue),
+        }
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct SetSessionOptionsRequest {
+        #[prost(map = "string, message", tag = "1")]
+        pub session_options: HashMap<String, SessionOptionValue>,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct SetSessionOptionsResult {
+        #[prost(map = "string, message", tag = "1")]
+        pub errors: HashMap<String, SetSessionOptionError>,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct SetSessionOptionError {
+        #[prost(enumeration = "SetSessionOptionErrorValue", tag = "1")]
+        pub value: i32,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+    #[repr(i32)]
+    pub enum SetSessionOptionErrorValue {
+        Unspecified = 0,
+        InvalidName = 1,
+        InvalidValue = 2,
+        Error = 3,
+    }
+
+    #[derive(Clone, Copy, PartialEq, prost::Message)]
+    pub struct GetSessionOptionsRequest {}
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct GetSessionOptionsResult {
+        #[prost(map = "string, message", tag = "1")]
+        pub session_options: HashMap<String, SessionOptionValue>,
+    }
+
+    #[derive(Clone, Copy, PartialEq, prost::Message)]
+    pub struct CloseSessionRequest {}
+
+    #[derive(Clone, Copy, PartialEq, prost::Message)]
+    pub struct CloseSessionResult {
+        #[prost(enumeration = "CloseSessionStatus", tag = "1")]
+        pub status: i32,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+    #[repr(i32)]
+    pub enum CloseSessionStatus {
+        Unspecified = 0,
+        Closed = 1,
+        Closing = 2,
+        NotCloseable = 3,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct FlightTlsConfig {
@@ -53,6 +145,7 @@ pub struct FlightServerConfig {
     pub keepalive_interval: Duration,
     pub keepalive_timeout: Duration,
     pub ticket_ttl: Duration,
+    pub session_ttl: Duration,
     pub tls: Option<FlightTlsConfig>,
 }
 
@@ -65,6 +158,7 @@ impl Default for FlightServerConfig {
             keepalive_interval: Duration::from_secs(30),
             keepalive_timeout: Duration::from_secs(10),
             ticket_ttl: Duration::from_secs(15 * 60),
+            session_ttl: Duration::from_secs(30 * 60),
             tls: None,
         }
     }
@@ -129,7 +223,9 @@ pub struct QcliFlightSql {
     gateway: GatewayService,
     sql_info: Arc<SqlInfoData>,
     tickets: Arc<TicketSigner>,
+    sessions: Arc<SessionSigner>,
     ticket_ttl: Duration,
+    session_ttl: Duration,
     max_flight_data_bytes: usize,
 }
 
@@ -142,7 +238,12 @@ impl QcliFlightSql {
     /// record batch.
     #[must_use]
     pub fn new(gateway: GatewayService) -> Self {
-        Self::with_limits(gateway, Duration::from_secs(15 * 60), 16 * 1024 * 1024)
+        Self::with_limits(
+            gateway,
+            Duration::from_secs(15 * 60),
+            Duration::from_secs(30 * 60),
+            16 * 1024 * 1024,
+        )
     }
 
     #[must_use]
@@ -155,6 +256,7 @@ impl QcliFlightSql {
     pub fn with_limits(
         gateway: GatewayService,
         ticket_ttl: Duration,
+        session_ttl: Duration,
         max_flight_data_bytes: usize,
     ) -> Self {
         let mut builder = SqlInfoDataBuilder::new();
@@ -174,7 +276,9 @@ impl QcliFlightSql {
             gateway,
             sql_info: Arc::new(builder.build().expect("static SQL info values are valid")),
             tickets: Arc::new(TicketSigner::new()),
+            sessions: Arc::new(SessionSigner::new()),
             ticket_ttl,
+            session_ttl,
             max_flight_data_bytes: max_flight_data_bytes.max(1024),
         }
     }
@@ -182,6 +286,219 @@ impl QcliFlightSql {
     #[must_use]
     pub fn gateway(&self) -> &GatewayService {
         &self.gateway
+    }
+
+    fn session_from_request<T>(
+        &self,
+        request: &Request<T>,
+        principal: &AuthenticatedPrincipal,
+    ) -> Result<Option<SessionTokenPayload>, Status> {
+        let Some(token) = cookie(request, SESSION_COOKIE) else {
+            return Ok(None);
+        };
+        let payload = self.sessions.verify(token.as_bytes(), &principal.id)?;
+        let snapshot = self
+            .gateway
+            .session(principal, &payload.session_id)
+            .map_err(service_error_status)?;
+        if snapshot.version != payload.session_version {
+            return Err(Status::aborted(
+                "Flight session token has a stale session version",
+            ));
+        }
+        Ok(Some(payload))
+    }
+
+    fn set_session_cookie<T>(
+        &self,
+        response: &mut Response<T>,
+        principal: &AuthenticatedPrincipal,
+        snapshot: &qcli_core::SessionSnapshot,
+    ) -> Result<(), Status> {
+        let token = self.sessions.issue(
+            &principal.id,
+            &snapshot.id,
+            snapshot.version,
+            self.session_ttl,
+        )?;
+        response.metadata_mut().insert(
+            "set-cookie",
+            MetadataValue::from_str(&format!(
+                "{SESSION_COOKIE}={}; Path=/; HttpOnly; SameSite=Strict",
+                String::from_utf8_lossy(&token)
+            ))
+            .map_err(|_| Status::internal("could not encode Flight session cookie"))?,
+        );
+        Ok(())
+    }
+
+    fn set_session_options(
+        &self,
+        request: &Request<Action>,
+    ) -> Result<Response<<Self as FlightService>::DoActionStream>, Status> {
+        use session_proto::{
+            SetSessionOptionError, SetSessionOptionErrorValue, SetSessionOptionsRequest,
+            SetSessionOptionsResult,
+        };
+
+        let principal = required_principal(request)?.clone();
+        let current = self.session_from_request(request, &principal)?;
+        let input = SetSessionOptionsRequest::decode(request.get_ref().body.as_ref())
+            .map_err(|_| Status::invalid_argument("SetSessionOptions body is malformed"))?;
+        let mut target = None;
+        let mut overrides = BTreeMap::new();
+        let mut errors = std::collections::HashMap::new();
+        for (name, value) in input.session_options {
+            if matches!(name.as_str(), "qcli.version" | "qcli.session_id") {
+                errors.insert(
+                    name,
+                    SetSessionOptionError {
+                        value: SetSessionOptionErrorValue::InvalidName as i32,
+                    },
+                );
+                continue;
+            }
+            let Some(value) = session_option_string(value) else {
+                errors.insert(
+                    name,
+                    SetSessionOptionError {
+                        value: SetSessionOptionErrorValue::InvalidValue as i32,
+                    },
+                );
+                continue;
+            };
+            if name == "qcli.target" {
+                match value {
+                    ParsedSessionOption::Value(value) if !value.is_empty() => target = Some(value),
+                    _ => {
+                        errors.insert(
+                            name,
+                            SetSessionOptionError {
+                                value: SetSessionOptionErrorValue::InvalidValue as i32,
+                            },
+                        );
+                    }
+                }
+            } else if let Some(property) = session_property_name(&name) {
+                overrides.insert(
+                    property,
+                    match value {
+                        ParsedSessionOption::Unset => None,
+                        ParsedSessionOption::Value(value) => Some(value),
+                    },
+                );
+            } else {
+                errors.insert(
+                    name,
+                    SetSessionOptionError {
+                        value: SetSessionOptionErrorValue::InvalidName as i32,
+                    },
+                );
+            }
+        }
+
+        let snapshot = if let Some(current) = current {
+            self.gateway
+                .mutate_session(
+                    &principal,
+                    &current.session_id,
+                    current.session_version,
+                    target.as_deref(),
+                    overrides,
+                )
+                .map_err(service_error_status)?
+        } else {
+            let target = target.ok_or_else(|| {
+                Status::invalid_argument("qcli.target is required when creating a Flight session")
+            })?;
+            self.gateway
+                .create_session(
+                    &principal,
+                    &target,
+                    overrides
+                        .into_iter()
+                        .filter_map(|(name, value)| value.map(|value| (name, value)))
+                        .collect(),
+                )
+                .map_err(service_error_status)?
+        };
+        let mut response =
+            action_result_response(SetSessionOptionsResult { errors }.encode_to_vec());
+        self.set_session_cookie(&mut response, &principal, &snapshot)?;
+        Ok(response)
+    }
+
+    fn get_session_options(
+        &self,
+        request: &Request<Action>,
+    ) -> Result<Response<<Self as FlightService>::DoActionStream>, Status> {
+        use session_proto::{GetSessionOptionsRequest, GetSessionOptionsResult};
+
+        GetSessionOptionsRequest::decode(request.get_ref().body.as_ref())
+            .map_err(|_| Status::invalid_argument("GetSessionOptions body is malformed"))?;
+        let principal = required_principal(request)?.clone();
+        let current = self
+            .session_from_request(request, &principal)?
+            .ok_or_else(|| Status::not_found("Flight session cookie is required"))?;
+        let snapshot = self
+            .gateway
+            .session(&principal, &current.session_id)
+            .map_err(service_error_status)?;
+        let mut options = std::collections::HashMap::from([
+            (
+                "qcli.target".into(),
+                string_session_option(snapshot.target.clone()),
+            ),
+            (
+                "qcli.session_id".into(),
+                string_session_option(snapshot.id.clone()),
+            ),
+            ("qcli.version".into(), int_session_option(snapshot.version)),
+        ]);
+        for (name, value) in &snapshot.overrides {
+            options.insert(
+                session_option_name(name),
+                string_session_option(value.clone()),
+            );
+        }
+        let mut response = action_result_response(
+            GetSessionOptionsResult {
+                session_options: options,
+            }
+            .encode_to_vec(),
+        );
+        self.set_session_cookie(&mut response, &principal, &snapshot)?;
+        Ok(response)
+    }
+
+    fn close_session(
+        &self,
+        request: &Request<Action>,
+    ) -> Result<Response<<Self as FlightService>::DoActionStream>, Status> {
+        use session_proto::{CloseSessionRequest, CloseSessionResult, CloseSessionStatus};
+
+        CloseSessionRequest::decode(request.get_ref().body.as_ref())
+            .map_err(|_| Status::invalid_argument("CloseSession body is malformed"))?;
+        let principal = required_principal(request)?.clone();
+        let current = self
+            .session_from_request(request, &principal)?
+            .ok_or_else(|| Status::not_found("Flight session cookie is required"))?;
+        self.gateway
+            .close_session(&principal, &current.session_id)
+            .map_err(service_error_status)?;
+        let mut response = action_result_response(
+            CloseSessionResult {
+                status: CloseSessionStatus::Closed as i32,
+            }
+            .encode_to_vec(),
+        );
+        response.metadata_mut().insert(
+            "set-cookie",
+            MetadataValue::from_static(
+                "arrow_flight_session_id=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict",
+            ),
+        );
+        Ok(response)
     }
 }
 
@@ -233,21 +550,27 @@ impl FlightSqlService for QcliFlightSql {
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
         let principal = required_principal(&request)?.clone();
-        let target = request
-            .metadata()
-            .get("qcli-target")
-            .and_then(|value| value.to_str().ok())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                Status::invalid_argument(
-                    "qcli-target metadata is required until Flight sessions are added",
-                )
-            })?;
         let descriptor = request.get_ref().clone();
-        let status = self
-            .gateway
-            .submit_stateless_query(&principal, target, BTreeMap::new(), query.query)
-            .map_err(service_error_status)?;
+        let session = self.session_from_request(&request, &principal)?;
+        let status = if let Some(session) = &session {
+            self.gateway
+                .submit_session_query(&principal, &session.session_id, query.query)
+                .map_err(service_error_status)?
+        } else {
+            let target = request
+                .metadata()
+                .get("qcli-target")
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    Status::invalid_argument(
+                        "qcli-target metadata or a Flight session cookie is required",
+                    )
+                })?;
+            self.gateway
+                .submit_stateless_query(&principal, target, BTreeMap::new(), query.query)
+                .map_err(service_error_status)?
+        };
         let status = wait_for_schema(&self.gateway, &principal, &status.id).await?;
         let schema = self
             .gateway
@@ -284,7 +607,15 @@ impl FlightSqlService for QcliFlightSql {
             })
             .with_ordered(true)
             .with_app_metadata(metadata);
-        Ok(Response::new(info))
+        let mut response = Response::new(info);
+        if let Some(session) = session {
+            let snapshot = self
+                .gateway
+                .session(&principal, &session.session_id)
+                .map_err(service_error_status)?;
+            self.set_session_cookie(&mut response, &principal, &snapshot)?;
+        }
+        Ok(response)
     }
 
     async fn do_get_sql_info(
@@ -356,6 +687,37 @@ impl FlightSqlService for QcliFlightSql {
         })
     }
 
+    async fn do_action_fallback(
+        &self,
+        request: Request<Action>,
+    ) -> Result<Response<<Self as FlightService>::DoActionStream>, Status> {
+        match request.get_ref().r#type.as_str() {
+            SET_SESSION_OPTIONS => self.set_session_options(&request),
+            GET_SESSION_OPTIONS => self.get_session_options(&request),
+            CLOSE_SESSION => self.close_session(&request),
+            action => Err(Status::invalid_argument(format!(
+                "unsupported Flight action '{action}'"
+            ))),
+        }
+    }
+
+    async fn list_custom_actions(&self) -> Option<Vec<Result<ActionType, Status>>> {
+        Some(vec![
+            Ok(ActionType {
+                r#type: SET_SESSION_OPTIONS.into(),
+                description: "Set or create the current Flight session".into(),
+            }),
+            Ok(ActionType {
+                r#type: GET_SESSION_OPTIONS.into(),
+                description: "Get current Flight session options".into(),
+            }),
+            Ok(ActionType {
+                r#type: CLOSE_SESSION.into(),
+                description: "Close the current Flight session".into(),
+            }),
+        ])
+    }
+
     async fn register_sql_info(&self, _id: i32, _result: &SqlInfo) {}
 }
 
@@ -374,6 +736,7 @@ pub async fn serve_flight(
     let service = QcliFlightSql::with_limits(
         gateway,
         config.ticket_ttl,
+        config.session_ttl,
         config.max_message_bytes.saturating_sub(1024),
     );
     let auth = authenticator.clone();
@@ -551,6 +914,63 @@ struct TicketSigner {
     key: [u8; 32],
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct SessionTokenPayload {
+    format_version: u8,
+    session_version: u64,
+    session_id: String,
+    owner: String,
+    expires_at: u64,
+}
+
+struct SessionSigner {
+    key: [u8; 32],
+}
+
+impl SessionSigner {
+    fn new() -> Self {
+        let mut key = [0_u8; 32];
+        key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+        key[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+        Self { key }
+    }
+
+    fn issue(
+        &self,
+        owner: &str,
+        session_id: &str,
+        version: u64,
+        ttl: Duration,
+    ) -> Result<Vec<u8>, Status> {
+        let payload = SessionTokenPayload {
+            format_version: 1,
+            session_version: version,
+            session_id: session_id.into(),
+            owner: owner.into(),
+            expires_at: now_unix().saturating_add(ttl.as_secs()),
+        };
+        sign_payload(&self.key, &payload)
+    }
+
+    fn verify(&self, token: &[u8], owner: &str) -> Result<SessionTokenPayload, Status> {
+        let payload: SessionTokenPayload = verify_payload(&self.key, token, "session token")?;
+        if payload.format_version != 1 {
+            return Err(Status::invalid_argument(
+                "Flight session token version is not supported",
+            ));
+        }
+        if payload.owner != owner {
+            return Err(Status::permission_denied(
+                "Flight session belongs to another principal",
+            ));
+        }
+        if payload.expires_at < now_unix() {
+            return Err(Status::not_found("Flight session token has expired"));
+        }
+        Ok(payload)
+    }
+}
+
 impl TicketSigner {
     fn new() -> Self {
         let mut key = [0_u8; 32];
@@ -616,11 +1036,125 @@ impl TicketSigner {
     }
 }
 
+fn sign_payload<T: Serialize>(key: &[u8], payload: &T) -> Result<Vec<u8>, Status> {
+    let payload =
+        serde_json::to_vec(payload).map_err(|error| Status::internal(error.to_string()))?;
+    let mut mac = HmacSha256::new_from_slice(key)
+        .map_err(|_| Status::internal("could not initialize token signer"))?;
+    mac.update(&payload);
+    let signature = mac.finalize().into_bytes();
+    Ok(format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(payload),
+        URL_SAFE_NO_PAD.encode(signature)
+    )
+    .into_bytes())
+}
+
+fn verify_payload<T: for<'de> Deserialize<'de>>(
+    key: &[u8],
+    token: &[u8],
+    label: &str,
+) -> Result<T, Status> {
+    let token = std::str::from_utf8(token)
+        .map_err(|_| Status::invalid_argument(format!("{label} is not valid UTF-8")))?;
+    let (payload, signature) = token
+        .split_once('.')
+        .ok_or_else(|| Status::invalid_argument(format!("{label} has an invalid format")))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(payload)
+        .map_err(|_| Status::invalid_argument(format!("{label} payload is invalid")))?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(signature)
+        .map_err(|_| Status::invalid_argument(format!("{label} signature is invalid")))?;
+    let mut mac = HmacSha256::new_from_slice(key)
+        .map_err(|_| Status::internal("could not initialize token verifier"))?;
+    mac.update(&payload);
+    mac.verify_slice(&signature)
+        .map_err(|_| Status::permission_denied(format!("{label} signature is invalid")))?;
+    serde_json::from_slice(&payload)
+        .map_err(|_| Status::invalid_argument(format!("{label} payload is invalid")))
+}
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn cookie<T>(request: &Request<T>, name: &str) -> Option<String> {
+    request
+        .metadata()
+        .get_all("cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .filter_map(|entry| entry.trim().split_once('='))
+        .find_map(|(key, value)| (key == name).then(|| value.to_owned()))
+}
+
+type ActionStream = Pin<Box<dyn Stream<Item = Result<FlightActionResult, Status>> + Send>>;
+
+fn action_result_response(body: Vec<u8>) -> Response<ActionStream> {
+    Response::new(Box::pin(stream::once(async move {
+        Ok(FlightActionResult { body: body.into() })
+    })))
+}
+
+enum ParsedSessionOption {
+    Unset,
+    Value(String),
+}
+
+fn session_option_string(value: session_proto::SessionOptionValue) -> Option<ParsedSessionOption> {
+    use session_proto::session_option_value::OptionValue;
+    Some(match value.option_value {
+        None => ParsedSessionOption::Unset,
+        Some(OptionValue::StringValue(value)) => ParsedSessionOption::Value(value),
+        Some(OptionValue::BoolValue(value)) => ParsedSessionOption::Value(value.to_string()),
+        Some(OptionValue::Int64Value(value)) => ParsedSessionOption::Value(value.to_string()),
+        Some(OptionValue::DoubleValue(value)) if value.is_finite() => {
+            ParsedSessionOption::Value(value.to_string())
+        }
+        Some(OptionValue::StringListValue(value)) => {
+            ParsedSessionOption::Value(serde_json::to_string(&value.values).ok()?)
+        }
+        Some(OptionValue::DoubleValue(_)) => return None,
+    })
+}
+
+fn session_property_name(option: &str) -> Option<String> {
+    match option {
+        "catalog" | "schema" | "timeout" => Some(option.into()),
+        _ => option
+            .strip_prefix("engine.")
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned),
+    }
+}
+
+fn session_option_name(property: &str) -> String {
+    match property {
+        "catalog" | "schema" | "timeout" => property.into(),
+        _ => format!("engine.{property}"),
+    }
+}
+
+fn string_session_option(value: String) -> session_proto::SessionOptionValue {
+    session_proto::SessionOptionValue {
+        option_value: Some(session_proto::session_option_value::OptionValue::StringValue(value)),
+    }
+}
+
+fn int_session_option(value: u64) -> session_proto::SessionOptionValue {
+    session_proto::SessionOptionValue {
+        option_value: Some(
+            session_proto::session_option_value::OptionValue::Int64Value(
+                i64::try_from(value).unwrap_or(i64::MAX),
+            ),
+        ),
+    }
 }
 
 async fn next_result_batch(
@@ -663,14 +1197,18 @@ mod tests {
             &self,
             bearer: &str,
         ) -> Result<AuthenticatedPrincipal, AuthenticationError> {
-            if bearer != "valid-key" {
-                return Err(AuthenticationError {
-                    kind: AuthenticationErrorKind::Invalid,
-                    message: "invalid bearer credential".into(),
-                });
-            }
+            let id = match bearer {
+                "valid-key" => "analyst",
+                "other-key" => "other",
+                _ => {
+                    return Err(AuthenticationError {
+                        kind: AuthenticationErrorKind::Invalid,
+                        message: "invalid bearer credential".into(),
+                    });
+                }
+            };
             Ok(AuthenticatedPrincipal {
-                id: "analyst".into(),
+                id: id.into(),
                 allowed_targets: BTreeSet::from(["demo".into()]),
                 max_sessions: 2,
                 max_concurrent_queries: 2,
@@ -797,6 +1335,221 @@ mod tests {
         task.await.unwrap().unwrap();
     }
 
+    async fn session_action(
+        client: &mut FlightSqlServiceClient<Channel>,
+        action_type: &str,
+        body: Vec<u8>,
+        bearer: &str,
+        cookie: Option<&str>,
+    ) -> Result<(Option<String>, Vec<u8>), Status> {
+        let mut request = Request::new(Action {
+            r#type: action_type.into(),
+            body: body.into(),
+        });
+        request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::from_str(&format!("Bearer {bearer}")).unwrap(),
+        );
+        if let Some(cookie) = cookie {
+            request.metadata_mut().insert(
+                "cookie",
+                MetadataValue::from_str(cookie).expect("valid cookie"),
+            );
+        }
+        let response = client.inner_mut().do_action(request).await?;
+        let set_cookie = response
+            .metadata()
+            .get("set-cookie")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let mut stream = response.into_inner();
+        let body = stream
+            .message()
+            .await?
+            .map_or_else(Vec::new, |result| result.body.to_vec());
+        Ok((set_cookie, body))
+    }
+
+    fn cookie_header(set_cookie: &str) -> &str {
+        set_cookie.split(';').next().unwrap()
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn standard_actions_create_mutate_use_get_and_close_session() {
+        use session_proto::session_option_value::OptionValue;
+        use session_proto::{
+            CloseSessionRequest, CloseSessionResult, CloseSessionStatus, GetSessionOptionsRequest,
+            GetSessionOptionsResult, SessionOptionValue, SetSessionOptionsRequest,
+            SetSessionOptionsResult,
+        };
+        use std::collections::HashMap;
+
+        let (mut client, shutdown, task) = server(FlightServerConfig::default()).await;
+        let set = SetSessionOptionsRequest {
+            session_options: HashMap::from([
+                (
+                    "qcli.target".into(),
+                    SessionOptionValue {
+                        option_value: Some(OptionValue::StringValue("demo".into())),
+                    },
+                ),
+                (
+                    "catalog".into(),
+                    SessionOptionValue {
+                        option_value: Some(OptionValue::StringValue("analytics".into())),
+                    },
+                ),
+            ]),
+        };
+        let (set_cookie, body) = session_action(
+            &mut client,
+            SET_SESSION_OPTIONS,
+            set.encode_to_vec(),
+            "valid-key",
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            SetSessionOptionsResult::decode(body.as_slice())
+                .unwrap()
+                .errors
+                .is_empty()
+        );
+        let set_cookie = set_cookie.unwrap();
+        let cookie = cookie_header(&set_cookie);
+
+        let mutate = SetSessionOptionsRequest {
+            session_options: HashMap::from([
+                (
+                    "qcli.target".into(),
+                    SessionOptionValue {
+                        option_value: Some(OptionValue::StringValue("demo".into())),
+                    },
+                ),
+                (
+                    "schema".into(),
+                    SessionOptionValue {
+                        option_value: Some(OptionValue::StringValue("public".into())),
+                    },
+                ),
+            ]),
+        };
+        let (mutated_cookie, _) = session_action(
+            &mut client,
+            SET_SESSION_OPTIONS,
+            mutate.encode_to_vec(),
+            "valid-key",
+            Some(cookie),
+        )
+        .await
+        .unwrap();
+        let mutated_cookie = mutated_cookie.unwrap();
+        let mutated_cookie = cookie_header(&mutated_cookie);
+        let stale = session_action(
+            &mut client,
+            SET_SESSION_OPTIONS,
+            SetSessionOptionsRequest {
+                session_options: HashMap::new(),
+            }
+            .encode_to_vec(),
+            "valid-key",
+            Some(cookie),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(stale.code(), Code::Aborted);
+
+        client.set_token("valid-key".into());
+        client.set_header("cookie", mutated_cookie);
+        let info = client.execute("select 1".into(), None).await.unwrap();
+        let mut results = client
+            .do_get(info.endpoint[0].ticket.clone().unwrap())
+            .await
+            .unwrap();
+        assert!(results.try_next().await.unwrap().is_some());
+
+        let (_, body) = session_action(
+            &mut client,
+            GET_SESSION_OPTIONS,
+            GetSessionOptionsRequest {}.encode_to_vec(),
+            "valid-key",
+            Some(mutated_cookie),
+        )
+        .await
+        .unwrap();
+        let options = GetSessionOptionsResult::decode(body.as_slice())
+            .unwrap()
+            .session_options;
+        assert_eq!(
+            options["qcli.target"].option_value,
+            Some(OptionValue::StringValue("demo".into()))
+        );
+        assert!(!options.contains_key("catalog"));
+        assert_eq!(
+            options["schema"].option_value,
+            Some(OptionValue::StringValue("public".into()))
+        );
+
+        let error = session_action(
+            &mut client,
+            GET_SESSION_OPTIONS,
+            GetSessionOptionsRequest {}.encode_to_vec(),
+            "other-key",
+            Some(mutated_cookie),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), Code::PermissionDenied);
+
+        let unauthorized = session_action(
+            &mut client,
+            SET_SESSION_OPTIONS,
+            SetSessionOptionsRequest {
+                session_options: HashMap::from([(
+                    "qcli.target".into(),
+                    SessionOptionValue {
+                        option_value: Some(OptionValue::StringValue("secret".into())),
+                    },
+                )]),
+            }
+            .encode_to_vec(),
+            "valid-key",
+            Some(mutated_cookie),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unauthorized.code(), Code::PermissionDenied);
+
+        let (_, body) = session_action(
+            &mut client,
+            CLOSE_SESSION,
+            CloseSessionRequest {}.encode_to_vec(),
+            "valid-key",
+            Some(mutated_cookie),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            CloseSessionResult::decode(body.as_slice()).unwrap().status,
+            CloseSessionStatus::Closed as i32
+        );
+        let error = session_action(
+            &mut client,
+            GET_SESSION_OPTIONS,
+            GetSessionOptionsRequest {}.encode_to_vec(),
+            "valid-key",
+            Some(mutated_cookie),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), Code::NotFound);
+
+        shutdown.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
     #[test]
     fn signed_tickets_are_opaque_tamper_evident_and_owner_bound() {
         let signer = TicketSigner::new();
@@ -815,6 +1568,41 @@ mod tests {
         let mut tampered = ticket;
         tampered[0] ^= 1;
         assert!(signer.verify(&tampered, "analyst").is_err());
+    }
+
+    #[test]
+    fn session_tokens_are_versioned_expiring_and_owner_bound() {
+        let signer = SessionSigner::new();
+        let token = signer
+            .issue("analyst", "session-1", 7, Duration::from_secs(60))
+            .unwrap();
+        let payload = signer.verify(&token, "analyst").unwrap();
+        assert_eq!(payload.format_version, 1);
+        assert_eq!(payload.session_version, 7);
+        assert_eq!(
+            signer.verify(&token, "other").unwrap_err().code(),
+            Code::PermissionDenied
+        );
+
+        let expired = sign_payload(
+            &signer.key,
+            &SessionTokenPayload {
+                format_version: 1,
+                session_version: 7,
+                session_id: "session-1".into(),
+                owner: "analyst".into(),
+                expires_at: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            signer.verify(&expired, "analyst").unwrap_err().code(),
+            Code::NotFound
+        );
+        let serialized = String::from_utf8_lossy(&token);
+        assert!(!serialized.contains("password"));
+        assert!(!serialized.contains("select "));
+        assert!(!serialized.contains("connection"));
     }
 
     #[tokio::test]

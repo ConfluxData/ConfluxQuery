@@ -20,6 +20,7 @@ pub struct SessionSnapshot {
     pub target: String,
     pub engine: String,
     pub properties: BTreeMap<String, String>,
+    pub overrides: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +211,48 @@ impl SessionManager {
         Ok(snapshot(session))
     }
 
+    /// Atomically replace the optional target and apply overrides with one
+    /// version increment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an unknown-session or version-conflict error without mutation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another thread poisoned the internal session lock.
+    pub fn mutate(
+        &self,
+        id: &str,
+        expected_version: u64,
+        target: Option<ResolvedTarget>,
+        values: BTreeMap<String, Option<String>>,
+    ) -> Result<SessionSnapshot, CoreError> {
+        let mut sessions = self.sessions.lock().expect("session mutex poisoned");
+        let session = sessions
+            .get_mut(id)
+            .ok_or_else(|| CoreError::SessionNotFound(id.into()))?;
+        if session.version != expected_version {
+            return Err(CoreError::VersionConflict {
+                expected: expected_version,
+                actual: session.version,
+            });
+        }
+        if let Some(target) = target {
+            session.target = target;
+            session.overrides.clear();
+        }
+        for (name, value) in values {
+            if let Some(value) = value {
+                session.overrides.insert(name, value);
+            } else {
+                session.overrides.remove(&name);
+            }
+        }
+        session.version += 1;
+        Ok(snapshot(session))
+    }
+
     /// Remove a logical session.
     ///
     /// # Errors
@@ -282,6 +325,7 @@ fn snapshot(session: &Session) -> SessionSnapshot {
         target: session.target.name.clone(),
         engine: session.target.engine.clone(),
         properties,
+        overrides: session.overrides.clone(),
     }
 }
 
@@ -480,6 +524,20 @@ mod tests {
             manager.set_option(&first.id, 1, "x".into(), "y".into()),
             Err(CoreError::VersionConflict { .. })
         ));
+        let third = manager
+            .mutate(
+                &first.id,
+                2,
+                Some(target()),
+                BTreeMap::from([
+                    ("schema".into(), Some("analytics".into())),
+                    ("decimal_places".into(), None),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(third.version, 3);
+        assert_eq!(third.overrides["schema"], "analytics");
+        assert!(!third.overrides.contains_key("decimal_places"));
     }
 
     #[tokio::test]

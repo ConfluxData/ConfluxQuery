@@ -2217,6 +2217,7 @@ dependencies = [
  "prost",
  "qcli-auth",
  "qcli-config",
+ "qcli-core",
  "qcli-driver-api",
  "qcli-driver-demo",
  "qcli-service",
