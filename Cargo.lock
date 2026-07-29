@@ -1323,6 +1323,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "http"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2200,18 +2209,25 @@ version = "0.1.0"
 dependencies = [
  "arrow-array 59.1.0",
  "arrow-flight",
+ "arrow-schema 59.1.0",
  "async-trait",
+ "base64",
  "futures-util",
+ "hmac",
  "prost",
  "qcli-auth",
  "qcli-config",
  "qcli-driver-api",
  "qcli-driver-demo",
  "qcli-service",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tokio-stream",
  "tonic",
  "tonic-health",
+ "uuid",
 ]
 
 [[package]]
@@ -2281,6 +2297,7 @@ version = "0.1.0"
 dependencies = [
  "arrow-array 59.1.0",
  "arrow-ipc 59.1.0",
+ "arrow-schema 59.1.0",
  "qcli-auth",
  "qcli-config",
  "qcli-core",
@@ -2526,7 +2543,7 @@ version = "8.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42ffa149f6aa81b58a5b3011d01a857c4ed12c7a732d2c51947a4c7c692185f0"
 dependencies = [
- "sha2",
+ "sha2 0.11.0",
  "walkdir",
 ]
 
@@ -2787,6 +2804,17 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
 ]
 
 [[package]]

@@ -1,30 +1,41 @@
 //! Arrow Flight SQL transport for qcli's shared gateway service.
 
 use arrow_flight::encode::FlightDataEncoderBuilder;
+use arrow_flight::error::FlightError;
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use arrow_flight::sql::metadata::{SqlInfoData, SqlInfoDataBuilder};
 use arrow_flight::sql::server::FlightSqlService;
-use arrow_flight::sql::{CommandGetSqlInfo, ProstMessageExt, SqlInfo, SqlSupportedTransaction};
+use arrow_flight::sql::{
+    ActionCancelQueryRequest, ActionCancelQueryResult, CommandGetSqlInfo, CommandStatementQuery,
+    ProstMessageExt, SqlInfo, SqlSupportedTransaction, TicketStatementQuery,
+};
 use arrow_flight::{
     FlightDescriptor, FlightEndpoint, FlightInfo, HandshakeRequest, HandshakeResponse, Ticket,
 };
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::{Stream, TryStreamExt, stream};
+use hmac::{Hmac, Mac};
 use prost::Message;
 use qcli_auth::{AuthenticatedPrincipal, AuthenticationErrorKind, Authenticator};
-use qcli_service::{GatewayService, ServiceError, ServiceErrorKind};
+use qcli_service::{GatewayService, ResultBatchReader, ServiceError, ServiceErrorKind};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tonic::metadata::MetadataValue;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
+use uuid::Uuid;
 
 pub const FLIGHT_SERVICE_NAME: &str = "arrow.flight.protocol.FlightService";
 
@@ -41,6 +52,7 @@ pub struct FlightServerConfig {
     pub request_timeout: Duration,
     pub keepalive_interval: Duration,
     pub keepalive_timeout: Duration,
+    pub ticket_ttl: Duration,
     pub tls: Option<FlightTlsConfig>,
 }
 
@@ -52,6 +64,7 @@ impl Default for FlightServerConfig {
             request_timeout: Duration::from_secs(60),
             keepalive_interval: Duration::from_secs(30),
             keepalive_timeout: Duration::from_secs(10),
+            ticket_ttl: Duration::from_secs(15 * 60),
             tls: None,
         }
     }
@@ -115,6 +128,9 @@ pub async fn bind_flight(
 pub struct QcliFlightSql {
     gateway: GatewayService,
     sql_info: Arc<SqlInfoData>,
+    tickets: Arc<TicketSigner>,
+    ticket_ttl: Duration,
+    max_flight_data_bytes: usize,
 }
 
 impl QcliFlightSql {
@@ -126,22 +142,40 @@ impl QcliFlightSql {
     /// record batch.
     #[must_use]
     pub fn new(gateway: GatewayService) -> Self {
+        Self::with_limits(gateway, Duration::from_secs(15 * 60), 16 * 1024 * 1024)
+    }
+
+    #[must_use]
+    /// Build a Flight SQL service with explicit ticket and message limits.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if Arrow cannot construct its specification-defined SQL
+    /// information record batch from static values.
+    pub fn with_limits(
+        gateway: GatewayService,
+        ticket_ttl: Duration,
+        max_flight_data_bytes: usize,
+    ) -> Self {
         let mut builder = SqlInfoDataBuilder::new();
         builder.append(SqlInfo::FlightSqlServerName, "qcli");
         builder.append(SqlInfo::FlightSqlServerVersion, env!("CARGO_PKG_VERSION"));
         builder.append(SqlInfo::FlightSqlServerArrowVersion, "1.3");
         builder.append(SqlInfo::FlightSqlServerReadOnly, false);
-        builder.append(SqlInfo::FlightSqlServerSql, false);
+        builder.append(SqlInfo::FlightSqlServerSql, true);
         builder.append(SqlInfo::FlightSqlServerSubstrait, false);
         builder.append(
             SqlInfo::FlightSqlServerTransaction,
             SqlSupportedTransaction::None as i32,
         );
-        builder.append(SqlInfo::FlightSqlServerCancel, false);
+        builder.append(SqlInfo::FlightSqlServerCancel, true);
         builder.append(SqlInfo::FlightSqlServerBulkIngestion, false);
         Self {
             gateway,
             sql_info: Arc::new(builder.build().expect("static SQL info values are valid")),
+            tickets: Arc::new(TicketSigner::new()),
+            ticket_ttl,
+            max_flight_data_bytes: max_flight_data_bytes.max(1024),
         }
     }
 
@@ -193,6 +227,66 @@ impl FlightSqlService for QcliFlightSql {
         Ok(Response::new(info))
     }
 
+    async fn get_flight_info_statement(
+        &self,
+        query: CommandStatementQuery,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        let principal = required_principal(&request)?.clone();
+        let target = request
+            .metadata()
+            .get("qcli-target")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                Status::invalid_argument(
+                    "qcli-target metadata is required until Flight sessions are added",
+                )
+            })?;
+        let descriptor = request.get_ref().clone();
+        let status = self
+            .gateway
+            .submit_stateless_query(&principal, target, BTreeMap::new(), query.query)
+            .map_err(service_error_status)?;
+        let status = wait_for_schema(&self.gateway, &principal, &status.id).await?;
+        let schema = self
+            .gateway
+            .query_schema(&principal, &status.id)
+            .map_err(service_error_status)?;
+        let signed = self
+            .tickets
+            .issue(&principal.id, &status.id, self.ticket_ttl)?;
+        let ticket = TicketStatementQuery {
+            statement_handle: signed.into(),
+        };
+        let endpoint =
+            FlightEndpoint::new().with_ticket(Ticket::new(ticket.as_any().encode_to_vec()));
+        let metadata = serde_json::to_vec(&serde_json::json!({
+            "qcli_query_id": status.id,
+            "engine_query_id": status.engine_query_id,
+            "target": status.target,
+        }))
+        .map_err(|error| Status::internal(error.to_string()))?;
+        let info = FlightInfo::new()
+            .try_with_schema(schema.as_ref())
+            .map_err(|error| Status::internal(error.to_string()))?
+            .with_descriptor(descriptor)
+            .with_endpoint(endpoint)
+            .with_total_records(if status.state == "completed" {
+                i64::try_from(status.rows).unwrap_or(i64::MAX)
+            } else {
+                -1
+            })
+            .with_total_bytes(if status.state == "completed" {
+                i64::try_from(status.retained_bytes).unwrap_or(i64::MAX)
+            } else {
+                -1
+            })
+            .with_ordered(true)
+            .with_app_metadata(metadata);
+        Ok(Response::new(info))
+    }
+
     async fn do_get_sql_info(
         &self,
         query: CommandGetSqlInfo,
@@ -206,6 +300,60 @@ impl FlightSqlService for QcliFlightSql {
             .build(stream::once(async { batch }))
             .map_err(Status::from);
         Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn do_get_statement(
+        &self,
+        ticket: TicketStatementQuery,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        let principal = required_principal(&request)?.clone();
+        let payload = self
+            .tickets
+            .verify(&ticket.statement_handle, &principal.id)?;
+        wait_for_terminal(&self.gateway, &principal, &payload.query_id).await?;
+        let schema = self
+            .gateway
+            .query_schema(&principal, &payload.query_id)
+            .map_err(service_error_status)?;
+        let reader = self
+            .gateway
+            .result_reader(&principal, &payload.query_id)
+            .map_err(service_error_status)?;
+        let batches = stream::try_unfold(reader, next_result_batch);
+        let encoded = FlightDataEncoderBuilder::new()
+            .with_schema(schema)
+            .with_max_flight_data_size(self.max_flight_data_bytes)
+            .build(batches)
+            .map_err(Status::from);
+        Ok(Response::new(Box::pin(encoded)))
+    }
+
+    async fn do_action_cancel_query(
+        &self,
+        query: ActionCancelQueryRequest,
+        request: Request<arrow_flight::Action>,
+    ) -> Result<ActionCancelQueryResult, Status> {
+        let principal = required_principal(&request)?;
+        let info = FlightInfo::decode(query.info)
+            .map_err(|_| Status::invalid_argument("cancel request has invalid FlightInfo"))?;
+        let ticket = info
+            .endpoint
+            .first()
+            .and_then(|endpoint| endpoint.ticket.as_ref())
+            .ok_or_else(|| Status::invalid_argument("cancel request has no query ticket"))?;
+        let statement = decode_statement_ticket(&ticket.ticket)?;
+        let payload = self
+            .tickets
+            .verify(&statement.statement_handle, &principal.id)?;
+        self.gateway
+            .cancel(principal, &payload.query_id)
+            .map_err(service_error_status)?;
+        Ok(ActionCancelQueryResult {
+            // Flight SQL's protobuf value for CANCELLING. The generated enum is
+            // not re-exported by arrow-flight, while the wire value is stable.
+            result: 2,
+        })
     }
 
     async fn register_sql_info(&self, _id: i32, _result: &SqlInfo) {}
@@ -223,7 +371,11 @@ pub async fn serve_flight(
     config: FlightServerConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), FlightServerError> {
-    let service = QcliFlightSql::new(gateway);
+    let service = QcliFlightSql::with_limits(
+        gateway,
+        config.ticket_ttl,
+        config.max_message_bytes.saturating_sub(1024),
+    );
     let auth = authenticator.clone();
     let trusted_proxy = config.trusted_proxy;
     let interceptor = move |mut request: Request<()>| {
@@ -342,6 +494,152 @@ pub fn principal(request: &Request<impl Sized>) -> Option<&AuthenticatedPrincipa
     request.extensions().get::<AuthenticatedPrincipal>()
 }
 
+fn required_principal<T>(request: &Request<T>) -> Result<&AuthenticatedPrincipal, Status> {
+    principal(request).ok_or_else(|| Status::unauthenticated("authenticated principal is missing"))
+}
+
+async fn wait_for_schema(
+    gateway: &GatewayService,
+    principal: &AuthenticatedPrincipal,
+    query_id: &str,
+) -> Result<qcli_service::QueryStatus, Status> {
+    loop {
+        match gateway.query_schema(principal, query_id) {
+            Ok(_) => {
+                return gateway
+                    .query(principal, query_id)
+                    .map_err(service_error_status);
+            }
+            Err(error)
+                if error.kind == ServiceErrorKind::FailedPrecondition
+                    && error.code == "query_running" =>
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => return Err(service_error_status(error)),
+        }
+    }
+}
+
+async fn wait_for_terminal(
+    gateway: &GatewayService,
+    principal: &AuthenticatedPrincipal,
+    query_id: &str,
+) -> Result<qcli_service::QueryStatus, Status> {
+    loop {
+        let status = gateway
+            .query(principal, query_id)
+            .map_err(service_error_status)?;
+        if matches!(status.state.as_str(), "completed" | "cancelled" | "failed") {
+            return Ok(status);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TicketPayload {
+    version: u8,
+    query_id: String,
+    owner: String,
+    expires_at: u64,
+}
+
+struct TicketSigner {
+    key: [u8; 32],
+}
+
+impl TicketSigner {
+    fn new() -> Self {
+        let mut key = [0_u8; 32];
+        key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+        key[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+        Self { key }
+    }
+
+    fn issue(&self, owner: &str, query_id: &str, ttl: Duration) -> Result<Vec<u8>, Status> {
+        let payload = TicketPayload {
+            version: 1,
+            query_id: query_id.into(),
+            owner: owner.into(),
+            expires_at: now_unix().saturating_add(ttl.as_secs()),
+        };
+        let payload =
+            serde_json::to_vec(&payload).map_err(|error| Status::internal(error.to_string()))?;
+        let mut mac = HmacSha256::new_from_slice(&self.key)
+            .map_err(|_| Status::internal("could not initialize ticket signer"))?;
+        mac.update(&payload);
+        let signature = mac.finalize().into_bytes();
+        Ok(format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(payload),
+            URL_SAFE_NO_PAD.encode(signature)
+        )
+        .into_bytes())
+    }
+
+    fn verify(&self, ticket: &[u8], owner: &str) -> Result<TicketPayload, Status> {
+        let ticket = std::str::from_utf8(ticket)
+            .map_err(|_| Status::invalid_argument("query ticket is not valid UTF-8"))?;
+        let (payload, signature) = ticket
+            .split_once('.')
+            .ok_or_else(|| Status::invalid_argument("query ticket has an invalid format"))?;
+        let payload = URL_SAFE_NO_PAD
+            .decode(payload)
+            .map_err(|_| Status::invalid_argument("query ticket payload is invalid"))?;
+        let signature = URL_SAFE_NO_PAD
+            .decode(signature)
+            .map_err(|_| Status::invalid_argument("query ticket signature is invalid"))?;
+        let mut mac = HmacSha256::new_from_slice(&self.key)
+            .map_err(|_| Status::internal("could not initialize ticket verifier"))?;
+        mac.update(&payload);
+        mac.verify_slice(&signature)
+            .map_err(|_| Status::permission_denied("query ticket signature is invalid"))?;
+        let payload: TicketPayload = serde_json::from_slice(&payload)
+            .map_err(|_| Status::invalid_argument("query ticket payload is invalid"))?;
+        if payload.version != 1 {
+            return Err(Status::invalid_argument(
+                "query ticket version is not supported",
+            ));
+        }
+        if payload.owner != owner {
+            return Err(Status::permission_denied(
+                "query ticket belongs to another principal",
+            ));
+        }
+        if payload.expires_at < now_unix() {
+            return Err(Status::not_found("query ticket has expired"));
+        }
+        Ok(payload)
+    }
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+async fn next_result_batch(
+    mut reader: ResultBatchReader,
+) -> Result<Option<(arrow_array::RecordBatch, ResultBatchReader)>, FlightError> {
+    let batch = reader
+        .next_batch()
+        .map_err(|error| FlightError::Tonic(Box::new(service_error_status(error))))?;
+    Ok(batch.map(|batch| (batch, reader)))
+}
+
+fn decode_statement_ticket(bytes: &[u8]) -> Result<TicketStatementQuery, Status> {
+    let any = arrow_flight::sql::Any::decode(bytes)
+        .map_err(|_| Status::invalid_argument("query ticket is malformed"))?;
+    any.unpack()
+        .map_err(|_| Status::invalid_argument("query ticket is malformed"))?
+        .ok_or_else(|| Status::invalid_argument("ticket is not a statement-query ticket"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,7 +748,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authentication_and_unsupported_operations_fail_stably() {
+    async fn authentication_and_missing_target_fail_stably() {
         let (mut client, shutdown, task) = server(FlightServerConfig::default()).await;
         let error = client.get_sql_info(vec![]).await.unwrap_err();
         assert!(matches!(
@@ -464,10 +762,59 @@ mod tests {
         assert!(matches!(
             error,
             arrow_flight::error::FlightError::Tonic(ref status)
-                if status.code() == Code::Unimplemented
+                if status.code() == Code::InvalidArgument
         ));
         shutdown.send(()).unwrap();
         task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn statement_query_streams_and_ticket_can_be_replayed() {
+        let (mut client, shutdown, task) = server(FlightServerConfig::default()).await;
+        client.set_token("valid-key".into());
+        client.set_header("qcli-target", "demo");
+        let info = client
+            .execute("select 1".into(), None)
+            .await
+            .expect("statement submission");
+        assert_eq!(info.endpoint.len(), 1);
+        assert!(info.total_records > 0);
+        let ticket = info.endpoint[0].ticket.clone().expect("query ticket");
+
+        for _ in 0..2 {
+            let mut results = client.do_get(ticket.clone()).await.expect("DoGet");
+            let mut rows = 0;
+            while let Some(batch) = results.try_next().await.expect("Arrow batch") {
+                assert_eq!(
+                    batch.schema().as_ref(),
+                    &info.clone().try_decode_schema().unwrap()
+                );
+                rows += batch.num_rows();
+            }
+            assert_eq!(i64::try_from(rows).unwrap(), info.total_records);
+        }
+        shutdown.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn signed_tickets_are_opaque_tamper_evident_and_owner_bound() {
+        let signer = TicketSigner::new();
+        let ticket = signer
+            .issue("analyst", "qcli_query_1", Duration::from_secs(60))
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&ticket).contains("qcli_query_1"));
+        assert_eq!(
+            signer.verify(&ticket, "analyst").unwrap().query_id,
+            "qcli_query_1"
+        );
+        assert_eq!(
+            signer.verify(&ticket, "other").unwrap_err().code(),
+            Code::PermissionDenied
+        );
+        let mut tampered = ticket;
+        tampered[0] ^= 1;
+        assert!(signer.verify(&tampered, "analyst").is_err());
     }
 
     #[tokio::test]

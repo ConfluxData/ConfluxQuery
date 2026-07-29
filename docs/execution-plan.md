@@ -377,7 +377,7 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 | M12 — Packaged release | In progress | Install and run signed cross-platform artifacts |
 | M13 — Shared service runtime | Complete | HTTP and future Flight SQL reuse one canonical service state |
 | M14 — Flight SQL foundation | Complete | Start a secure Flight SQL listener and complete protocol discovery |
-| M15 — Flight SQL query streaming | Pending | Execute and stream Arrow results across all three engines |
+| M15 — Flight SQL query streaming | Complete | Execute and stream Arrow results across all three engines |
 | M16 — Unified Flight sessions | Pending | Manage target and context through standard Flight SQL sessions |
 | M17 — Flight SQL metadata | Pending | Browse complete target-aware SQL metadata through standard clients |
 | M18 — Prepared statements and updates | Pending | Bind typed parameters and execute queries/updates safely |

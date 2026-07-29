@@ -9,6 +9,7 @@ version.workspace = true
 [dependencies]
 arrow-array.workspace = true
 arrow-ipc.workspace = true
+arrow-schema.workspace = true
 qcli-auth = { version = "0.1.0", path = "../qcli-auth" }
 qcli-config = { version = "0.1.0", path = "../qcli-config" }
 qcli-core = { version = "0.1.0", path = "../qcli-core" }

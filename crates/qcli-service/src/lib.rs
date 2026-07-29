@@ -3,6 +3,7 @@
 use arrow_array::RecordBatch;
 use arrow_ipc::reader::FileReader;
 use arrow_ipc::writer::FileWriter;
+use arrow_schema::{Schema, SchemaRef};
 use qcli_auth::AuthenticatedPrincipal;
 use qcli_config::{Config, ResolvedTarget};
 use qcli_core::{CoreError, QueryHandle, QueryItem, QueryService, SessionManager, SessionSnapshot};
@@ -129,6 +130,7 @@ pub struct QueryStatus {
     pub engine_query_id: Option<String>,
     pub state: String,
     pub rows: usize,
+    pub retained_bytes: usize,
     pub error: Option<QueryError>,
 }
 
@@ -136,6 +138,32 @@ pub struct ResultPage {
     pub batches: Vec<RecordBatch>,
     pub total_rows: usize,
     pub next_offset: Option<usize>,
+}
+
+pub struct ResultBatchReader {
+    source: ResultBatchReaderSource,
+}
+
+enum ResultBatchReaderSource {
+    Memory(std::vec::IntoIter<RecordBatch>),
+    Spill(FileReader<std::fs::File>),
+}
+
+impl ResultBatchReader {
+    /// Read the next retained Arrow batch without buffering later batches.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured storage error if a spilled Arrow IPC result cannot
+    /// be decoded.
+    pub fn next_batch(&mut self) -> Result<Option<RecordBatch>, ServiceError> {
+        match &mut self.source {
+            ResultBatchReaderSource::Memory(batches) => Ok(batches.next()),
+            ResultBatchReaderSource::Spill(batches) => {
+                batches.next().transpose().map_err(storage_service_error)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +189,7 @@ struct QueryData {
     engine_query_id: Option<String>,
     rows: usize,
     retained_bytes: usize,
+    schema: Option<SchemaRef>,
     storage: ResultStorage,
     events: Vec<ServiceEvent>,
     next_event_id: u64,
@@ -481,6 +510,77 @@ impl GatewayService {
         })
     }
 
+    pub fn result_reader(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        query_id: &str,
+    ) -> Result<ResultBatchReader, ServiceError> {
+        let record = self.owned_record(principal, query_id)?;
+        let data = record.data.lock().expect("query record mutex poisoned");
+        if let Some(error) = &data.error {
+            return Err(ServiceError::new(
+                ServiceErrorKind::FailedPrecondition,
+                error.code.clone(),
+                error.message.clone(),
+            ));
+        }
+        if !matches!(data.state.as_str(), "completed" | "cancelled") {
+            return Err(ServiceError::new(
+                ServiceErrorKind::FailedPrecondition,
+                "query_running",
+                "results are available after query completion",
+            ));
+        }
+        let source = match &data.storage {
+            ResultStorage::Memory(batches) => {
+                ResultBatchReaderSource::Memory(batches.clone().into_iter())
+            }
+            ResultStorage::Spill { path, writer: None } => {
+                let file = std::fs::File::open(path).map_err(storage_service_error)?;
+                ResultBatchReaderSource::Spill(
+                    FileReader::try_new(file, None).map_err(storage_service_error)?,
+                )
+            }
+            ResultStorage::Spill {
+                writer: Some(_), ..
+            } => {
+                return Err(ServiceError::new(
+                    ServiceErrorKind::FailedPrecondition,
+                    "query_running",
+                    "results are available after query completion",
+                ));
+            }
+        };
+        Ok(ResultBatchReader { source })
+    }
+
+    pub fn query_schema(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        query_id: &str,
+    ) -> Result<SchemaRef, ServiceError> {
+        let record = self.owned_record(principal, query_id)?;
+        let data = record.data.lock().expect("query record mutex poisoned");
+        if let Some(error) = &data.error {
+            return Err(ServiceError::new(
+                ServiceErrorKind::Upstream,
+                error.code.clone(),
+                error.message.clone(),
+            ));
+        }
+        if let Some(schema) = &data.schema {
+            return Ok(schema.clone());
+        }
+        if matches!(data.state.as_str(), "completed" | "cancelled" | "failed") {
+            return Ok(Arc::new(Schema::empty()));
+        }
+        Err(ServiceError::new(
+            ServiceErrorKind::FailedPrecondition,
+            "query_running",
+            "query schema is not available yet",
+        ))
+    }
+
     pub fn event_history(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -620,6 +720,7 @@ impl GatewayService {
                 engine_query_id: None,
                 rows: 0,
                 retained_bytes: 0,
+                schema: None,
                 storage: ResultStorage::Memory(Vec::new()),
                 events: Vec::new(),
                 next_event_id: 1,
@@ -952,6 +1053,7 @@ fn query_status(record: &QueryRecord) -> QueryStatus {
         engine_query_id: data.engine_query_id.clone(),
         state: data.state.clone(),
         rows: data.rows,
+        retained_bytes: data.retained_bytes,
         error: data.error.clone(),
     }
 }
@@ -1038,6 +1140,9 @@ fn store_batch(
     batch: RecordBatch,
     limits: &ServiceLimits,
 ) -> Result<(), QueryError> {
+    if data.schema.is_none() {
+        data.schema = Some(batch.schema());
+    }
     let bytes = batch
         .columns()
         .iter()
