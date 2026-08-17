@@ -36,6 +36,7 @@ impl EngineAdapter for SnowflakeAdapter {
             AdapterCapability::ListSchemas,
             AdapterCapability::ListObjects,
             AdapterCapability::DescribeObject,
+            AdapterCapability::PreparedStatements,
         ])
     }
 

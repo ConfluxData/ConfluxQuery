@@ -423,6 +423,30 @@ impl QueryService {
     /// Returns [`CoreError::AdapterNotFound`] if no adapter is registered for
     /// the snapshot's engine.
     pub fn submit(&self, snapshot: SessionSnapshot, sql: String) -> Result<QueryHandle, CoreError> {
+        self.submit_with_parameters(snapshot, sql, None)
+    }
+
+    /// Submit SQL and typed parameter batches using the selected adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::AdapterNotFound`] if no adapter is registered for
+    /// the snapshot's engine.
+    pub fn submit_prepared(
+        &self,
+        snapshot: SessionSnapshot,
+        sql: String,
+        parameters: Vec<RecordBatch>,
+    ) -> Result<QueryHandle, CoreError> {
+        self.submit_with_parameters(snapshot, sql, Some(parameters))
+    }
+
+    fn submit_with_parameters(
+        &self,
+        snapshot: SessionSnapshot,
+        sql: String,
+        parameters: Option<Vec<RecordBatch>>,
+    ) -> Result<QueryHandle, CoreError> {
         let adapter = self
             .adapters
             .get(&snapshot.engine)
@@ -451,7 +475,11 @@ impl QueryService {
                 .send(QueryEvent::State(QueryState::Submitted))
                 .await
                 .ok();
-            let result = adapter.execute(request, sink).await;
+            let result = if let Some(parameters) = parameters {
+                adapter.execute_prepared(request, parameters, sink).await
+            } else {
+                adapter.execute(request, sink).await
+            };
             let final_state = match &result {
                 Ok(()) => QueryState::Completed,
                 Err(error) if error.code == "cancelled" => QueryState::Cancelled,
@@ -471,6 +499,70 @@ impl QueryService {
             cancellation,
             task,
         })
+    }
+
+    /// Execute a native statement update and return its affected-row count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter lookup or native driver error.
+    pub async fn execute_update(
+        &self,
+        snapshot: SessionSnapshot,
+        sql: String,
+    ) -> Result<i64, CoreError> {
+        let adapter = self
+            .adapters
+            .get(&snapshot.engine)
+            .cloned()
+            .ok_or_else(|| CoreError::AdapterNotFound(snapshot.engine.clone()))?;
+        let id = format!("qcli_{:016x}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        adapter
+            .execute_update(QueryRequest {
+                qcli_query_id: id,
+                session_id: snapshot.id,
+                session_version: snapshot.version,
+                target: snapshot.target,
+                engine: snapshot.engine,
+                sql,
+                properties: snapshot.properties,
+            })
+            .await
+            .map_err(CoreError::Driver)
+    }
+
+    /// Execute a native prepared update with typed parameter batches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter lookup, unsupported-capability, or native driver error.
+    pub async fn execute_prepared_update(
+        &self,
+        snapshot: SessionSnapshot,
+        sql: String,
+        parameters: Vec<RecordBatch>,
+    ) -> Result<i64, CoreError> {
+        let adapter = self
+            .adapters
+            .get(&snapshot.engine)
+            .cloned()
+            .ok_or_else(|| CoreError::AdapterNotFound(snapshot.engine.clone()))?;
+        let id = format!("qcli_{:016x}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        adapter
+            .execute_prepared_update(
+                QueryRequest {
+                    qcli_query_id: id,
+                    session_id: snapshot.id,
+                    session_version: snapshot.version,
+                    target: snapshot.target,
+                    engine: snapshot.engine,
+                    sql,
+                    properties: snapshot.properties,
+                },
+                parameters,
+            )
+            .await
+            .map_err(CoreError::Driver)
     }
 }
 

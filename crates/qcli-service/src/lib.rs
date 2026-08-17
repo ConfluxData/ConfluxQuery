@@ -8,7 +8,8 @@ use qcli_auth::AuthenticatedPrincipal;
 use qcli_config::{Config, ResolvedTarget};
 use qcli_core::{CoreError, QueryHandle, QueryItem, QueryService, SessionManager, SessionSnapshot};
 use qcli_driver_api::{
-    CancellationSignal, EngineAdapter, MetadataRequest, QueryEvent, QueryProgress, QueryState,
+    AdapterCapability, CancellationSignal, EngineAdapter, MetadataRequest, QueryEvent,
+    QueryProgress, QueryState,
 };
 use qcli_metadata::MetadataService;
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,8 @@ pub struct ServiceLimits {
     pub max_sql_bytes: usize,
     pub session_ttl: Duration,
     pub shutdown_grace: Duration,
+    pub max_prepared_statements: usize,
+    pub prepared_statement_ttl: Duration,
 }
 
 impl Default for ServiceLimits {
@@ -42,6 +45,8 @@ impl Default for ServiceLimits {
             max_sql_bytes: 1024 * 1024,
             session_ttl: Duration::from_secs(30 * 60),
             shutdown_grace: Duration::from_secs(10),
+            max_prepared_statements: 128,
+            prepared_statement_ttl: Duration::from_secs(15 * 60),
         }
     }
 }
@@ -187,6 +192,26 @@ struct QueryRecord {
     events: broadcast::Sender<ServiceEvent>,
 }
 
+#[derive(Clone, Debug)]
+pub struct PreparedStatementSnapshot {
+    pub handle: String,
+    pub session_id: String,
+    pub sql: String,
+    pub dataset_schema: SchemaRef,
+    pub parameter_schema: SchemaRef,
+    pub parameters: Vec<RecordBatch>,
+}
+
+struct PreparedStatementRecord {
+    owner: String,
+    session_id: String,
+    sql: String,
+    dataset_schema: SchemaRef,
+    parameter_schema: SchemaRef,
+    parameters: Vec<RecordBatch>,
+    last_access: Instant,
+}
+
 struct QueryData {
     state: String,
     engine_query_id: Option<String>,
@@ -233,6 +258,7 @@ struct ServiceState {
     metadata: Arc<MetadataService>,
     session_owners: Mutex<HashMap<String, SessionOwner>>,
     records: Mutex<HashMap<String, Arc<QueryRecord>>>,
+    prepared: Mutex<HashMap<String, PreparedStatementRecord>>,
     limits: ServiceLimits,
     audit: Mutex<Arc<dyn AuditSink>>,
     shutting_down: AtomicBool,
@@ -264,6 +290,7 @@ impl GatewayService {
                 metadata: Arc::new(MetadataService::new(adapters, Duration::from_secs(30))),
                 session_owners: Mutex::new(HashMap::new()),
                 records: Mutex::new(HashMap::new()),
+                prepared: Mutex::new(HashMap::new()),
                 limits,
                 audit: Mutex::new(Arc::new(NullAuditSink)),
                 shutting_down: AtomicBool::new(false),
@@ -473,6 +500,11 @@ impl GatewayService {
             .lock()
             .expect("session owner mutex poisoned")
             .remove(session_id);
+        self.state
+            .prepared
+            .lock()
+            .expect("prepared mutex poisoned")
+            .retain(|_, record| record.session_id != session_id);
         self.audit(
             "session.delete",
             "allowed",
@@ -491,7 +523,7 @@ impl GatewayService {
         sql: String,
     ) -> Result<QueryStatus, ServiceError> {
         let snapshot = self.session(principal, session_id)?;
-        self.submit_query(principal, &snapshot, sql, false)
+        self.submit_query(principal, &snapshot, sql, None, false)
     }
 
     pub fn submit_stateless_query(
@@ -502,7 +534,7 @@ impl GatewayService {
         sql: String,
     ) -> Result<QueryStatus, ServiceError> {
         let snapshot = self.create_session(principal, target_name, overrides)?;
-        match self.submit_query(principal, &snapshot, sql, true) {
+        match self.submit_query(principal, &snapshot, sql, None, true) {
             Ok(status) => Ok(status),
             Err(error) => {
                 self.state.sessions.close(&snapshot.id).ok();
@@ -513,6 +545,187 @@ impl GatewayService {
                     .remove(&snapshot.id);
                 Err(error)
             }
+        }
+    }
+
+    pub fn create_prepared_statement(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        session_id: &str,
+        sql: String,
+    ) -> Result<PreparedStatementSnapshot, ServiceError> {
+        self.ensure_available()?;
+        if sql.is_empty() || sql.len() > self.state.limits.max_sql_bytes {
+            return Err(ServiceError::new(
+                ServiceErrorKind::InvalidArgument,
+                "invalid_sql_size",
+                "prepared SQL has an invalid size",
+            ));
+        }
+        let session = self.session(principal, session_id)?;
+        let capabilities = self
+            .state
+            .metadata
+            .capabilities(&session.engine)
+            .ok_or_else(|| {
+                ServiceError::new(
+                    ServiceErrorKind::InvalidArgument,
+                    "adapter_not_found",
+                    "adapter capabilities are unavailable",
+                )
+            })?;
+        if !capabilities.supports(AdapterCapability::PreparedStatements) {
+            return Err(ServiceError::new(
+                ServiceErrorKind::FailedPrecondition,
+                "unsupported_capability",
+                "prepared statements are not supported by this adapter",
+            ));
+        }
+        self.cleanup_expired();
+        let mut prepared = self.state.prepared.lock().expect("prepared mutex poisoned");
+        if prepared.len() >= self.state.limits.max_prepared_statements {
+            return Err(ServiceError::new(
+                ServiceErrorKind::ResourceExhausted,
+                "prepared_limit",
+                "prepared statement limit reached",
+            ));
+        }
+        let handle = Uuid::new_v4().simple().to_string();
+        prepared.insert(
+            handle.clone(),
+            PreparedStatementRecord {
+                owner: principal.id.clone(),
+                session_id: session_id.into(),
+                sql,
+                dataset_schema: Arc::new(Schema::empty()),
+                parameter_schema: Arc::new(Schema::empty()),
+                parameters: Vec::new(),
+                last_access: Instant::now(),
+            },
+        );
+        Ok(prepared_snapshot(
+            &handle,
+            prepared.get(&handle).expect("new prepared handle exists"),
+        ))
+    }
+
+    pub fn bind_prepared_statement(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        handle: &str,
+        parameters: Vec<RecordBatch>,
+    ) -> Result<PreparedStatementSnapshot, ServiceError> {
+        self.cleanup_expired();
+        let mut prepared = self.state.prepared.lock().expect("prepared mutex poisoned");
+        let record = prepared
+            .get_mut(handle)
+            .filter(|record| record.owner == principal.id)
+            .ok_or_else(prepared_not_found)?;
+        let session = self.session(principal, &record.session_id)?;
+        let capabilities = self
+            .state
+            .metadata
+            .capabilities(&session.engine)
+            .ok_or_else(prepared_not_found)?;
+        if !capabilities.supports(AdapterCapability::TypedParameters) {
+            return Err(ServiceError::new(
+                ServiceErrorKind::FailedPrecondition,
+                "unsupported_capability",
+                "native typed parameter binding is not supported by this adapter",
+            ));
+        }
+        if let Some(first) = parameters.first()
+            && parameters
+                .iter()
+                .any(|batch| batch.schema() != first.schema())
+        {
+            return Err(ServiceError::new(
+                ServiceErrorKind::InvalidArgument,
+                "parameter_schema_mismatch",
+                "all parameter batches must have the same Arrow schema",
+            ));
+        }
+        record.parameter_schema = parameters
+            .first()
+            .map_or_else(|| Arc::new(Schema::empty()), RecordBatch::schema);
+        record.parameters = parameters;
+        record.last_access = Instant::now();
+        Ok(prepared_snapshot(handle, record))
+    }
+
+    pub fn prepared_statement(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        handle: &str,
+    ) -> Result<PreparedStatementSnapshot, ServiceError> {
+        self.cleanup_expired();
+        let mut prepared = self.state.prepared.lock().expect("prepared mutex poisoned");
+        let record = prepared
+            .get_mut(handle)
+            .filter(|record| record.owner == principal.id)
+            .ok_or_else(prepared_not_found)?;
+        record.last_access = Instant::now();
+        Ok(prepared_snapshot(handle, record))
+    }
+
+    pub fn execute_prepared_statement(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        handle: &str,
+    ) -> Result<QueryStatus, ServiceError> {
+        let prepared = self.prepared_statement(principal, handle)?;
+        let snapshot = self.session(principal, &prepared.session_id)?;
+        self.submit_query(
+            principal,
+            &snapshot,
+            prepared.sql,
+            Some(prepared.parameters),
+            false,
+        )
+    }
+
+    pub async fn execute_prepared_update(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        handle: &str,
+    ) -> Result<i64, ServiceError> {
+        let prepared = self.prepared_statement(principal, handle)?;
+        let snapshot = self.session(principal, &prepared.session_id)?;
+        self.state
+            .queries
+            .execute_prepared_update(snapshot, prepared.sql, prepared.parameters)
+            .await
+            .map_err(|error| core_error(&error))
+    }
+
+    pub async fn execute_session_update(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        session_id: &str,
+        sql: String,
+    ) -> Result<i64, ServiceError> {
+        let snapshot = self.session(principal, session_id)?;
+        self.state
+            .queries
+            .execute_update(snapshot, sql)
+            .await
+            .map_err(|error| core_error(&error))
+    }
+
+    pub fn close_prepared_statement(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        handle: &str,
+    ) -> Result<(), ServiceError> {
+        let mut prepared = self.state.prepared.lock().expect("prepared mutex poisoned");
+        if prepared
+            .get(handle)
+            .is_some_and(|record| record.owner == principal.id)
+        {
+            prepared.remove(handle);
+            Ok(())
+        } else {
+            Err(prepared_not_found())
         }
     }
 
@@ -693,6 +906,13 @@ impl GatewayService {
     pub fn cleanup_expired(&self) {
         let now = Instant::now();
         self.state
+            .prepared
+            .lock()
+            .expect("prepared mutex poisoned")
+            .retain(|_, record| {
+                now.duration_since(record.last_access) < self.state.limits.prepared_statement_ttl
+            });
+        self.state
             .records
             .lock()
             .expect("query registry mutex poisoned")
@@ -754,6 +974,7 @@ impl GatewayService {
         principal: &AuthenticatedPrincipal,
         snapshot: &SessionSnapshot,
         sql: String,
+        parameters: Option<Vec<RecordBatch>>,
         close_session: bool,
     ) -> Result<QueryStatus, ServiceError> {
         self.ensure_available()?;
@@ -783,11 +1004,15 @@ impl GatewayService {
                 "local retained-query limit reached",
             ));
         }
-        let handle = self
-            .state
-            .queries
-            .submit(snapshot.clone(), sql)
-            .map_err(|error| core_error(&error))?;
+        let handle = match parameters {
+            Some(parameters) => {
+                self.state
+                    .queries
+                    .submit_prepared(snapshot.clone(), sql, parameters)
+            }
+            None => self.state.queries.submit(snapshot.clone(), sql),
+        }
+        .map_err(|error| core_error(&error))?;
         let (events, _) = broadcast::channel(128);
         let record = Arc::new(QueryRecord {
             id: format!("qcli_{}", Uuid::new_v4().simple()),
@@ -1384,6 +1609,25 @@ fn metadata_request(
     }
 }
 
+fn prepared_snapshot(handle: &str, record: &PreparedStatementRecord) -> PreparedStatementSnapshot {
+    PreparedStatementSnapshot {
+        handle: handle.into(),
+        session_id: record.session_id.clone(),
+        sql: record.sql.clone(),
+        dataset_schema: Arc::clone(&record.dataset_schema),
+        parameter_schema: Arc::clone(&record.parameter_schema),
+        parameters: record.parameters.clone(),
+    }
+}
+
+fn prepared_not_found() -> ServiceError {
+    ServiceError::new(
+        ServiceErrorKind::NotFound,
+        "prepared_not_found",
+        "prepared statement not found",
+    )
+}
+
 fn state_name(state: QueryState) -> &'static str {
     match state {
         QueryState::Submitted => "submitted",
@@ -1418,6 +1662,10 @@ fn is_sensitive_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::types::Int32Type;
+    use arrow_array::{
+        BinaryArray, Decimal128Array, ListArray, StringArray, TimestampMicrosecondArray,
+    };
     use qcli_driver_demo::DemoAdapter;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1588,6 +1836,113 @@ mod tests {
             events
                 .iter()
                 .any(|event| event.data["state"] == "cancelled")
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_registry_preserves_typed_batches_and_update_counts() {
+        let service = service(ServiceLimits::default());
+        let analyst = principal("analyst");
+        let session = service
+            .create_session(&analyst, "demo", BTreeMap::new())
+            .unwrap();
+        let prepared = service
+            .create_prepared_statement(&analyst, &session.id, "select ?".into())
+            .unwrap();
+        let decimal = Decimal128Array::from(vec![Some(12_345), None])
+            .with_precision_and_scale(12, 2)
+            .unwrap();
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "nullable",
+                Arc::new(StringArray::from(vec![Some("x"), None])) as _,
+            ),
+            ("decimal", Arc::new(decimal) as _),
+            (
+                "timestamp",
+                Arc::new(TimestampMicrosecondArray::from(vec![
+                    Some(1_700_000_000_000_000),
+                    None,
+                ])) as _,
+            ),
+            (
+                "binary",
+                Arc::new(BinaryArray::from(vec![Some(&b"abc"[..]), None])) as _,
+            ),
+            (
+                "nested",
+                Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+                    Some(vec![Some(1), None]),
+                    None,
+                ])) as _,
+            ),
+        ])
+        .unwrap();
+        let expected = vec![batch.slice(0, 1), batch.slice(1, 1)];
+        service
+            .bind_prepared_statement(&analyst, &prepared.handle, expected.clone())
+            .unwrap();
+        let query = service
+            .execute_prepared_statement(&analyst, &prepared.handle)
+            .unwrap();
+        let terminal = wait_for_terminal(&service, &analyst, &query.id).await;
+        assert_eq!(terminal.state, "completed");
+        let mut reader = service.result_reader(&analyst, &query.id).unwrap();
+        let mut actual = Vec::new();
+        while let Some(batch) = reader.next_batch().unwrap() {
+            actual.push(batch);
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(
+            service
+                .execute_prepared_update(&analyst, &prepared.handle)
+                .await
+                .unwrap(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_handles_are_owner_bound_closed_and_expire() {
+        let service = service(ServiceLimits {
+            prepared_statement_ttl: Duration::from_millis(1),
+            ..ServiceLimits::default()
+        });
+        let analyst = principal("analyst");
+        let stranger = principal("stranger");
+        let session = service
+            .create_session(&analyst, "demo", BTreeMap::new())
+            .unwrap();
+        let prepared = service
+            .create_prepared_statement(&analyst, &session.id, "select ?".into())
+            .unwrap();
+        assert_eq!(
+            service
+                .prepared_statement(&stranger, &prepared.handle)
+                .unwrap_err()
+                .kind,
+            ServiceErrorKind::NotFound
+        );
+        service
+            .close_prepared_statement(&analyst, &prepared.handle)
+            .unwrap();
+        assert_eq!(
+            service
+                .prepared_statement(&analyst, &prepared.handle)
+                .unwrap_err()
+                .kind,
+            ServiceErrorKind::NotFound
+        );
+        let expiring = service
+            .create_prepared_statement(&analyst, &session.id, "select ?".into())
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert_eq!(
+            service
+                .prepared_statement(&analyst, &expiring.handle)
+                .unwrap_err()
+                .kind,
+            ServiceErrorKind::NotFound
         );
     }
 }

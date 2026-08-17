@@ -102,16 +102,22 @@ pub enum AdapterCapability {
     ListSchemas,
     ListObjects,
     DescribeObject,
+    PreparedStatements,
+    TypedParameters,
+    StatementUpdates,
 }
 
 impl AdapterCapability {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 9] = [
         Self::StreamResults,
         Self::CancelQuery,
         Self::ListCatalogs,
         Self::ListSchemas,
         Self::ListObjects,
         Self::DescribeObject,
+        Self::PreparedStatements,
+        Self::TypedParameters,
+        Self::StatementUpdates,
     ];
 
     #[must_use]
@@ -123,6 +129,9 @@ impl AdapterCapability {
             Self::ListSchemas => "list_schemas",
             Self::ListObjects => "list_objects",
             Self::DescribeObject => "describe_object",
+            Self::PreparedStatements => "prepared_statements",
+            Self::TypedParameters => "typed_parameters",
+            Self::StatementUpdates => "statement_updates",
         }
     }
 }
@@ -224,6 +233,41 @@ pub trait EngineAdapter: Send + Sync {
         IdentifierCapabilities::default()
     }
     async fn execute(&self, request: QueryRequest, sink: QuerySink) -> Result<(), DriverError>;
+    async fn execute_prepared(
+        &self,
+        request: QueryRequest,
+        parameters: Vec<RecordBatch>,
+        sink: QuerySink,
+    ) -> Result<(), DriverError> {
+        if parameters.iter().all(|batch| batch.num_columns() == 0) {
+            self.execute(request, sink).await
+        } else {
+            Err(DriverError::new(
+                "unsupported_capability",
+                "native typed parameter binding is not supported by this adapter",
+            ))
+        }
+    }
+    async fn execute_update(&self, _request: QueryRequest) -> Result<i64, DriverError> {
+        Err(DriverError::new(
+            "unsupported_capability",
+            "native statement update counts are not supported by this adapter",
+        ))
+    }
+    async fn execute_prepared_update(
+        &self,
+        request: QueryRequest,
+        parameters: Vec<RecordBatch>,
+    ) -> Result<i64, DriverError> {
+        if parameters.is_empty() || parameters.iter().all(|batch| batch.num_columns() == 0) {
+            self.execute_update(request).await
+        } else {
+            Err(DriverError::new(
+                "unsupported_capability",
+                "native typed prepared updates are not supported by this adapter",
+            ))
+        }
+    }
     async fn list_catalogs(
         &self,
         _request: MetadataRequest,

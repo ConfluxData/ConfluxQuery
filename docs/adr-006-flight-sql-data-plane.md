@@ -83,9 +83,10 @@ and authorization permit it.
   milestone.
 - Flight SQL ODBC is experimental until a selected driver passes Windows,
   Linux, macOS, metadata, type, cancellation, and representative BI-tool tests.
-- Unsupported transactions, prepared statements, updates, ingestion, or
-  metadata are reported through standard capabilities and errors; they are not
-  silently emulated.
+- Unsupported transactions, typed parameters, updates, ingestion, or metadata
+  are reported through standard capabilities and errors; they are not silently
+  emulated. Prepared lifecycle support is independent from native binding and
+  update-count support.
 
 ## Consequences
 
@@ -104,7 +105,8 @@ Costs:
   security surface.
 - JDBC/ODBC compatibility requires exact metadata and type behavior, not merely
   statement execution.
-- Prepared statements and ingestion require new adapter contracts.
+- Native parameter binding, update counts, and ingestion require explicit
+  adapter contracts and per-target conformance.
 - High availability requires shared sessions, query leases, distributed quotas,
   and object-backed results.
 

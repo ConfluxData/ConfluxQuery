@@ -1324,6 +1324,17 @@ owner/session binding, opaque handles, parameter and result schemas, expiry,
 and explicit closure. Engine-native parameter binding is preferred. qcli must
 never implement parameters through unsafe SQL string interpolation.
 
+The shared service now owns that registry. Flight SQL maps standard create,
+bind, query/update execution, and close operations onto it. Arrow parameter
+batches remain typed end to end, including nulls and nested values. Adapters
+advertise three independent capabilities: prepared statement lifecycle, native
+typed parameters, and statement update counts. A request is rejected when its
+selected adapter lacks the required native capability; qcli does not substitute
+SQL text or invent an update count. The deterministic demo adapter implements
+all three for conformance. Trino, Databricks SQL, and Snowflake currently expose
+prepared lifecycle and zero-parameter execution, but not typed binding or
+updates until their client libraries provide correct native contracts.
+
 Transactions remain unsupported until the shared session and adapter contracts
 can implement target-native begin, commit, rollback, failure, expiry, and
 shutdown behavior correctly. qcli never emulates a cross-engine transaction or

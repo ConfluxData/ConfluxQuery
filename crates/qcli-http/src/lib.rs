@@ -160,6 +160,7 @@ impl HttpService {
             max_sql_bytes: limits.max_sql_bytes,
             session_ttl: limits.session_ttl,
             shutdown_grace: limits.shutdown_grace,
+            ..ServiceLimits::default()
         };
         Self::from_gateway(
             GatewayService::new(config, adapters, service_limits),

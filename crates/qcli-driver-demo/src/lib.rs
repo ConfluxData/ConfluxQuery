@@ -28,6 +28,9 @@ impl EngineAdapter for DemoAdapter {
             AdapterCapability::ListSchemas,
             AdapterCapability::ListObjects,
             AdapterCapability::DescribeObject,
+            AdapterCapability::PreparedStatements,
+            AdapterCapability::TypedParameters,
+            AdapterCapability::StatementUpdates,
         ])
     }
 
@@ -97,6 +100,50 @@ impl EngineAdapter for DemoAdapter {
         }
         sink.events.send(QueryEvent::RowsProduced(rows)).await.ok();
         Ok(())
+    }
+
+    async fn execute_prepared(
+        &self,
+        request: QueryRequest,
+        parameters: Vec<RecordBatch>,
+        sink: QuerySink,
+    ) -> Result<(), DriverError> {
+        if parameters.is_empty() || parameters.iter().all(|batch| batch.num_columns() == 0) {
+            return self.execute(request, sink).await;
+        }
+        sink.events
+            .send(QueryEvent::State(QueryState::Running))
+            .await
+            .ok();
+        let mut rows = 0;
+        for batch in parameters {
+            rows += batch.num_rows();
+            sink.batches
+                .send(batch)
+                .await
+                .map_err(|_| DriverError::new("consumer_closed", "result consumer closed"))?;
+        }
+        sink.events.send(QueryEvent::RowsProduced(rows)).await.ok();
+        Ok(())
+    }
+
+    async fn execute_update(&self, _request: QueryRequest) -> Result<i64, DriverError> {
+        Ok(1)
+    }
+
+    async fn execute_prepared_update(
+        &self,
+        _request: QueryRequest,
+        parameters: Vec<RecordBatch>,
+    ) -> Result<i64, DriverError> {
+        Ok(i64::try_from(
+            parameters
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>()
+                .max(1),
+        )
+        .unwrap_or(i64::MAX))
     }
 
     async fn list_catalogs(

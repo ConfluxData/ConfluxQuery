@@ -1,24 +1,29 @@
 //! Arrow Flight SQL transport for qcli's shared gateway service.
 
 use arrow_array::RecordBatch;
+use arrow_flight::decode::FlightRecordBatchStream;
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use arrow_flight::sql::metadata::{
     SqlInfoData, SqlInfoDataBuilder, XdbcTypeInfo, XdbcTypeInfoData, XdbcTypeInfoDataBuilder,
 };
-use arrow_flight::sql::server::FlightSqlService;
+use arrow_flight::sql::server::{FlightSqlService, PeekableFlightDataStream};
 use arrow_flight::sql::{
-    ActionCancelQueryRequest, ActionCancelQueryResult, CommandGetCatalogs,
+    ActionCancelQueryRequest, ActionCancelQueryResult, ActionClosePreparedStatementRequest,
+    ActionCreatePreparedStatementRequest, ActionCreatePreparedStatementResult, CommandGetCatalogs,
     CommandGetCrossReference, CommandGetDbSchemas, CommandGetExportedKeys, CommandGetImportedKeys,
     CommandGetPrimaryKeys, CommandGetSqlInfo, CommandGetTableTypes, CommandGetTables,
-    CommandGetXdbcTypeInfo, CommandStatementQuery, Nullable, ProstMessageExt, Searchable, SqlInfo,
-    SqlSupportedCaseSensitivity, SqlSupportedTransaction, TicketStatementQuery, XdbcDataType,
+    CommandGetXdbcTypeInfo, CommandPreparedStatementQuery, CommandPreparedStatementUpdate,
+    CommandStatementQuery, CommandStatementUpdate, DoPutPreparedStatementResult, Nullable,
+    ProstMessageExt, Searchable, SqlInfo, SqlSupportedCaseSensitivity, SqlSupportedTransaction,
+    TicketStatementQuery, XdbcDataType,
 };
 use arrow_flight::{
     Action, ActionType, FlightDescriptor, FlightEndpoint, FlightInfo, HandshakeRequest,
-    HandshakeResponse, Result as FlightActionResult, Ticket,
+    HandshakeResponse, IpcMessage, Result as FlightActionResult, SchemaAsIpc, Ticket,
 };
+use arrow_ipc::writer::IpcWriteOptions;
 use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -646,6 +651,21 @@ impl FlightSqlService for QcliFlightSql {
         Ok(response)
     }
 
+    async fn get_flight_info_prepared_statement(
+        &self,
+        query: CommandPreparedStatementQuery,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        let principal = required_principal(&request)?.clone();
+        let handle = prepared_handle(&query.prepared_statement_handle)?;
+        let descriptor = request.get_ref().clone();
+        let status = self
+            .gateway
+            .execute_prepared_statement(&principal, handle)
+            .map_err(service_error_status)?;
+        query_flight_info(self, &principal, status, descriptor, None).await
+    }
+
     async fn get_flight_info_catalogs(
         &self,
         query: CommandGetCatalogs,
@@ -969,6 +989,123 @@ impl FlightSqlService for QcliFlightSql {
         Ok(Response::new(Box::pin(encoded)))
     }
 
+    async fn do_get_prepared_statement(
+        &self,
+        query: CommandPreparedStatementQuery,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        let principal = required_principal(&request)?.clone();
+        let handle = prepared_handle(&query.prepared_statement_handle)?;
+        let status = self
+            .gateway
+            .execute_prepared_statement(&principal, handle)
+            .map_err(service_error_status)?;
+        wait_for_terminal(&self.gateway, &principal, &status.id).await?;
+        let schema = self
+            .gateway
+            .query_schema(&principal, &status.id)
+            .map_err(service_error_status)?;
+        let reader = self
+            .gateway
+            .result_reader(&principal, &status.id)
+            .map_err(service_error_status)?;
+        let batches = stream::try_unfold(reader, next_result_batch);
+        let encoded = FlightDataEncoderBuilder::new()
+            .with_schema(schema)
+            .with_max_flight_data_size(self.max_flight_data_bytes)
+            .build(batches)
+            .map_err(Status::from);
+        Ok(Response::new(Box::pin(encoded)))
+    }
+
+    async fn do_put_prepared_statement_query(
+        &self,
+        query: CommandPreparedStatementQuery,
+        request: Request<PeekableFlightDataStream>,
+    ) -> Result<DoPutPreparedStatementResult, Status> {
+        let principal = required_principal(&request)?.clone();
+        let handle = prepared_handle(&query.prepared_statement_handle)?;
+        let batches = FlightRecordBatchStream::new_from_flight_data(
+            request
+                .into_inner()
+                .map_err(|status| FlightError::Tonic(Box::new(status))),
+        )
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(Status::from)?;
+        self.gateway
+            .bind_prepared_statement(&principal, handle, batches)
+            .map_err(service_error_status)?;
+        Ok(DoPutPreparedStatementResult {
+            prepared_statement_handle: Some(query.prepared_statement_handle),
+        })
+    }
+
+    async fn do_put_prepared_statement_update(
+        &self,
+        query: CommandPreparedStatementUpdate,
+        request: Request<PeekableFlightDataStream>,
+    ) -> Result<i64, Status> {
+        let principal = required_principal(&request)?.clone();
+        let handle = prepared_handle(&query.prepared_statement_handle)?;
+        self.gateway
+            .execute_prepared_update(&principal, handle)
+            .await
+            .map_err(service_error_status)
+    }
+
+    async fn do_put_statement_update(
+        &self,
+        query: CommandStatementUpdate,
+        request: Request<PeekableFlightDataStream>,
+    ) -> Result<i64, Status> {
+        let principal = required_principal(&request)?.clone();
+        let session = self
+            .session_from_request(&request, &principal)?
+            .ok_or_else(|| Status::failed_precondition("statement updates require a session"))?;
+        self.gateway
+            .execute_session_update(&principal, &session.session_id, query.query)
+            .await
+            .map_err(service_error_status)
+    }
+
+    async fn do_action_create_prepared_statement(
+        &self,
+        query: ActionCreatePreparedStatementRequest,
+        request: Request<Action>,
+    ) -> Result<ActionCreatePreparedStatementResult, Status> {
+        if query.transaction_id.is_some() {
+            return Err(Status::unimplemented("transactions are not supported"));
+        }
+        let principal = required_principal(&request)?.clone();
+        let session = self
+            .session_from_request(&request, &principal)?
+            .ok_or_else(|| {
+                Status::failed_precondition("prepared statements require a Flight session")
+            })?;
+        let prepared = self
+            .gateway
+            .create_prepared_statement(&principal, &session.session_id, query.query)
+            .map_err(service_error_status)?;
+        Ok(ActionCreatePreparedStatementResult {
+            prepared_statement_handle: prepared.handle.into_bytes().into(),
+            dataset_schema: encode_schema(prepared.dataset_schema.as_ref())?.into(),
+            parameter_schema: encode_schema(prepared.parameter_schema.as_ref())?.into(),
+        })
+    }
+
+    async fn do_action_close_prepared_statement(
+        &self,
+        query: ActionClosePreparedStatementRequest,
+        request: Request<Action>,
+    ) -> Result<(), Status> {
+        let principal = required_principal(&request)?;
+        let handle = prepared_handle(&query.prepared_statement_handle)?;
+        self.gateway
+            .close_prepared_statement(principal, handle)
+            .map_err(service_error_status)
+    }
+
     async fn do_action_cancel_query(
         &self,
         query: ActionCancelQueryRequest,
@@ -1185,6 +1322,75 @@ fn metadata_flight_info<M: ProstMessageExt>(
         .with_total_bytes(-1)
         .with_ordered(true);
     Ok(Response::new(info))
+}
+
+async fn query_flight_info(
+    service: &QcliFlightSql,
+    principal: &AuthenticatedPrincipal,
+    status: qcli_service::QueryStatus,
+    descriptor: FlightDescriptor,
+    session: Option<&qcli_core::SessionSnapshot>,
+) -> Result<Response<FlightInfo>, Status> {
+    let status = wait_for_schema(&service.gateway, principal, &status.id).await?;
+    let schema = service
+        .gateway
+        .query_schema(principal, &status.id)
+        .map_err(service_error_status)?;
+    let signed = service
+        .tickets
+        .issue(&principal.id, &status.id, service.ticket_ttl)?;
+    let ticket = TicketStatementQuery {
+        statement_handle: signed.into(),
+    };
+    let endpoint = FlightEndpoint::new().with_ticket(Ticket::new(ticket.as_any().encode_to_vec()));
+    let metadata = serde_json::to_vec(&serde_json::json!({
+        "qcli_query_id": status.id,
+        "engine_query_id": status.engine_query_id,
+        "target": status.target,
+    }))
+    .map_err(|error| Status::internal(error.to_string()))?;
+    let info = FlightInfo::new()
+        .try_with_schema(schema.as_ref())
+        .map_err(|error| Status::internal(error.to_string()))?
+        .with_descriptor(descriptor)
+        .with_endpoint(endpoint)
+        .with_total_records(if status.state == "completed" {
+            i64::try_from(status.rows).unwrap_or(i64::MAX)
+        } else {
+            -1
+        })
+        .with_total_bytes(if status.state == "completed" {
+            i64::try_from(status.retained_bytes).unwrap_or(i64::MAX)
+        } else {
+            -1
+        })
+        .with_ordered(true)
+        .with_app_metadata(metadata);
+    let mut response = Response::new(info);
+    if let Some(session) = session {
+        service.set_session_cookie(&mut response, principal, session)?;
+    }
+    Ok(response)
+}
+
+fn prepared_handle(value: &[u8]) -> Result<&str, Status> {
+    let value = std::str::from_utf8(value)
+        .map_err(|_| Status::invalid_argument("prepared statement handle is invalid"))?;
+    if value.is_empty() {
+        Err(Status::invalid_argument(
+            "prepared statement handle is invalid",
+        ))
+    } else {
+        Ok(value)
+    }
+}
+
+fn encode_schema(schema: &Schema) -> Result<Vec<u8>, Status> {
+    let options = IpcWriteOptions::default();
+    let IpcMessage(bytes) = SchemaAsIpc::new(schema, &options)
+        .try_into()
+        .map_err(|error: arrow_schema::ArrowError| Status::internal(error.to_string()))?;
+    Ok(bytes.to_vec())
 }
 
 #[allow(clippy::type_complexity, clippy::unnecessary_wraps)]
@@ -2087,6 +2293,85 @@ mod tests {
 
     fn cookie_header(set_cookie: &str) -> &str {
         set_cookie.split(';').next().unwrap()
+    }
+
+    async fn open_demo_session(client: &mut FlightSqlServiceClient<Channel>) -> String {
+        use session_proto::session_option_value::OptionValue;
+        use session_proto::{SessionOptionValue, SetSessionOptionsRequest};
+        let request = SetSessionOptionsRequest {
+            session_options: std::collections::HashMap::from([(
+                "qcli.target".into(),
+                SessionOptionValue {
+                    option_value: Some(OptionValue::StringValue("demo".into())),
+                },
+            )]),
+        };
+        let (cookie, _) = session_action(
+            client,
+            SET_SESSION_OPTIONS,
+            request.encode_to_vec(),
+            "valid-key",
+            None,
+        )
+        .await
+        .unwrap();
+        cookie_header(cookie.as_deref().unwrap()).to_owned()
+    }
+
+    #[tokio::test]
+    async fn official_client_prepares_binds_executes_updates_and_closes() {
+        let (mut client, shutdown, task) = server(FlightServerConfig::default()).await;
+        let cookie = open_demo_session(&mut client).await;
+        client.set_token("valid-key".into());
+        client.set_header("cookie", &cookie);
+
+        let decimal = arrow_array::Decimal128Array::from(vec![Some(12_345), None])
+            .with_precision_and_scale(12, 2)
+            .unwrap();
+        let parameters = RecordBatch::try_from_iter(vec![
+            (
+                "nullable",
+                Arc::new(arrow_array::StringArray::from(vec![Some("x"), None])) as _,
+            ),
+            ("decimal", Arc::new(decimal) as _),
+            (
+                "binary",
+                Arc::new(arrow_array::BinaryArray::from(vec![
+                    Some(&b"abc"[..]),
+                    None,
+                ])) as _,
+            ),
+        ])
+        .unwrap();
+        let mut prepared = client.prepare("select ?".into(), None).await.unwrap();
+        prepared.set_parameters(parameters.clone()).unwrap();
+        let info = prepared.execute().await.unwrap();
+        let mut result = client
+            .do_get(info.endpoint[0].ticket.clone().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(result.try_next().await.unwrap().unwrap(), parameters);
+        assert!(result.try_next().await.unwrap().is_none());
+        prepared.close().await.unwrap();
+
+        let mut update = client
+            .prepare("update demo set value = ?".into(), None)
+            .await
+            .unwrap();
+        update
+            .set_parameters(
+                RecordBatch::try_from_iter(vec![(
+                    "value",
+                    Arc::new(arrow_array::Int64Array::from(vec![1, 2])) as _,
+                )])
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(update.execute_update().await.unwrap(), 2);
+        update.close().await.unwrap();
+
+        shutdown.send(()).unwrap();
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]

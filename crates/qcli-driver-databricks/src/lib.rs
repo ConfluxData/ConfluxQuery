@@ -33,6 +33,7 @@ impl EngineAdapter for DatabricksAdapter {
             AdapterCapability::ListSchemas,
             AdapterCapability::ListObjects,
             AdapterCapability::DescribeObject,
+            AdapterCapability::PreparedStatements,
         ])
     }
 

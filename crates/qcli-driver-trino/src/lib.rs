@@ -37,6 +37,7 @@ impl EngineAdapter for TrinoAdapter {
             AdapterCapability::ListSchemas,
             AdapterCapability::ListObjects,
             AdapterCapability::DescribeObject,
+            AdapterCapability::PreparedStatements,
         ])
     }
 
