@@ -7,8 +7,8 @@ use futures_util::StreamExt;
 use qcli_auth::UsernamePasswordCredential;
 use qcli_driver_api::{
     AdapterCapabilities, AdapterCapability, CatalogMetadata, ColumnMetadata, DriverError,
-    EngineAdapter, MetadataRequest, ObjectKind, ObjectMetadata, QueryEvent, QueryRequest,
-    QuerySink, QueryState, SchemaMetadata,
+    EngineAdapter, IdentifierCapabilities, IdentifierCase, MetadataRequest, ObjectKind,
+    ObjectMetadata, QueryEvent, QueryRequest, QuerySink, QueryState, SchemaMetadata,
 };
 use snowflakedb_rs::auth::AuthStrategy;
 use snowflakedb_rs::{
@@ -37,6 +37,14 @@ impl EngineAdapter for SnowflakeAdapter {
             AdapterCapability::ListObjects,
             AdapterCapability::DescribeObject,
         ])
+    }
+
+    fn identifier_capabilities(&self) -> IdentifierCapabilities {
+        IdentifierCapabilities {
+            unquoted: IdentifierCase::Upper,
+            quoted: IdentifierCase::Mixed,
+            quote: "\"".into(),
+        }
     }
 
     async fn execute(&self, request: QueryRequest, sink: QuerySink) -> Result<(), DriverError> {

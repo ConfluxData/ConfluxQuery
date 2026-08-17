@@ -17,6 +17,7 @@ hmac.workspace = true
 prost.workspace = true
 qcli-auth = { version = "0.1.0", path = "../qcli-auth" }
 qcli-core = { version = "0.1.0", path = "../qcli-core" }
+qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
 qcli-service = { version = "0.1.0", path = "../qcli-service" }
 serde.workspace = true
 serde_json.workspace = true

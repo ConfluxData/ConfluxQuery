@@ -7,7 +7,10 @@ use arrow_schema::{Schema, SchemaRef};
 use qcli_auth::AuthenticatedPrincipal;
 use qcli_config::{Config, ResolvedTarget};
 use qcli_core::{CoreError, QueryHandle, QueryItem, QueryService, SessionManager, SessionSnapshot};
-use qcli_driver_api::{CancellationSignal, EngineAdapter, QueryEvent, QueryProgress, QueryState};
+use qcli_driver_api::{
+    CancellationSignal, EngineAdapter, MetadataRequest, QueryEvent, QueryProgress, QueryState,
+};
+use qcli_metadata::MetadataService;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -227,6 +230,7 @@ struct ServiceState {
     config: Arc<Config>,
     sessions: Arc<SessionManager>,
     queries: Arc<QueryService>,
+    metadata: Arc<MetadataService>,
     session_owners: Mutex<HashMap<String, SessionOwner>>,
     records: Mutex<HashMap<String, Arc<QueryRecord>>>,
     limits: ServiceLimits,
@@ -251,11 +255,13 @@ impl GatewayService {
         adapters: impl IntoIterator<Item = Arc<dyn EngineAdapter>>,
         limits: ServiceLimits,
     ) -> Self {
+        let adapters = adapters.into_iter().collect::<Vec<_>>();
         Self {
             state: Arc::new(ServiceState {
                 config: Arc::new(config),
                 sessions: Arc::new(SessionManager::default()),
-                queries: Arc::new(QueryService::new(adapters, 8)),
+                queries: Arc::new(QueryService::new(adapters.clone(), 8)),
+                metadata: Arc::new(MetadataService::new(adapters, Duration::from_secs(30))),
                 session_owners: Mutex::new(HashMap::new()),
                 records: Mutex::new(HashMap::new()),
                 limits,
@@ -273,6 +279,56 @@ impl GatewayService {
 
     pub fn set_audit_sink(&self, audit: Arc<dyn AuditSink>) {
         *self.state.audit.lock().expect("audit sink mutex poisoned") = audit;
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> Arc<MetadataService> {
+        Arc::clone(&self.state.metadata)
+    }
+
+    pub fn session_metadata_request(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        session_id: &str,
+        catalog: Option<String>,
+        schema: Option<String>,
+        pattern: Option<String>,
+    ) -> Result<MetadataRequest, ServiceError> {
+        let snapshot = self.session(principal, session_id)?;
+        Ok(metadata_request(
+            principal,
+            snapshot.target,
+            snapshot.engine,
+            snapshot.properties,
+            catalog,
+            schema,
+            pattern,
+        ))
+    }
+
+    pub fn target_metadata_request(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        target_name: &str,
+        catalog: Option<String>,
+        schema: Option<String>,
+        pattern: Option<String>,
+    ) -> Result<MetadataRequest, ServiceError> {
+        let target = self.authorized_target(principal, target_name)?;
+        let properties = target
+            .properties
+            .iter()
+            .map(|(name, value)| (name.clone(), value.expose().to_owned()))
+            .collect();
+        Ok(metadata_request(
+            principal,
+            target.name,
+            target.engine,
+            properties,
+            catalog,
+            schema,
+            pattern,
+        ))
     }
 
     #[must_use]
@@ -1306,6 +1362,26 @@ fn core_error(error: &CoreError) -> ServiceError {
         CoreError::Driver(_) | CoreError::Task(_) => ServiceErrorKind::Upstream,
     };
     ServiceError::new(kind, "core", error.to_string())
+}
+
+fn metadata_request(
+    principal: &AuthenticatedPrincipal,
+    target: String,
+    engine: String,
+    properties: BTreeMap<String, String>,
+    catalog: Option<String>,
+    schema: Option<String>,
+    pattern: Option<String>,
+) -> MetadataRequest {
+    MetadataRequest {
+        identity: principal.id.clone(),
+        target,
+        engine,
+        properties,
+        catalog,
+        schema,
+        pattern,
+    }
 }
 
 fn state_name(state: QueryState) -> &'static str {

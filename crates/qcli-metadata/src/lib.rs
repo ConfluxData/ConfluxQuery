@@ -19,6 +19,7 @@ enum Operation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CacheKey {
+    identity: String,
     target: String,
     engine: String,
     catalog: Option<String>,
@@ -155,6 +156,23 @@ impl MetadataService {
         })
     }
 
+    #[must_use]
+    pub fn capabilities(&self, engine: &str) -> Option<qcli_driver_api::AdapterCapabilities> {
+        self.adapters
+            .get(engine)
+            .map(|adapter| adapter.capabilities())
+    }
+
+    #[must_use]
+    pub fn identifier_capabilities(
+        &self,
+        engine: &str,
+    ) -> Option<qcli_driver_api::IdentifierCapabilities> {
+        self.adapters
+            .get(engine)
+            .map(|adapter| adapter.identifier_capabilities())
+    }
+
     fn cached(&self, key: &CacheKey) -> Option<CachedValue> {
         let mut cache = self.cache.lock().expect("metadata cache mutex poisoned");
         cache.retain(|_, entry| entry.inserted.elapsed() <= self.ttl);
@@ -179,6 +197,7 @@ fn cache_key(request: &MetadataRequest, operation: Operation) -> CacheKey {
     let mut hasher = DefaultHasher::new();
     request.properties.hash(&mut hasher);
     CacheKey {
+        identity: request.identity.clone(),
         target: request.target.clone(),
         engine: request.engine.clone(),
         catalog: request.catalog.clone(),
@@ -227,6 +246,7 @@ mod tests {
 
     fn request(target: &str) -> MetadataRequest {
         MetadataRequest {
+            identity: "test-user".into(),
             target: target.into(),
             engine: "counting".into(),
             properties: BTreeMap::new(),
@@ -248,8 +268,12 @@ mod tests {
         assert_eq!(adapter.0.load(Ordering::Relaxed), 1);
         service.catalogs(request("two")).await.unwrap();
         assert_eq!(adapter.0.load(Ordering::Relaxed), 2);
+        let mut other_identity = request("two");
+        other_identity.identity = "other-user".into();
+        service.catalogs(other_identity).await.unwrap();
+        assert_eq!(adapter.0.load(Ordering::Relaxed), 3);
         service.invalidate_target("one");
         service.catalogs(request("one")).await.unwrap();
-        assert_eq!(adapter.0.load(Ordering::Relaxed), 3);
+        assert_eq!(adapter.0.load(Ordering::Relaxed), 4);
     }
 }

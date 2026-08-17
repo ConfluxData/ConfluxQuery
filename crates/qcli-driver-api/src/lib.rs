@@ -132,6 +132,31 @@ pub struct AdapterCapabilities {
     pub supported: BTreeSet<AdapterCapability>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentifierCase {
+    Insensitive,
+    Upper,
+    Lower,
+    Mixed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentifierCapabilities {
+    pub unquoted: IdentifierCase,
+    pub quoted: IdentifierCase,
+    pub quote: String,
+}
+
+impl Default for IdentifierCapabilities {
+    fn default() -> Self {
+        Self {
+            unquoted: IdentifierCase::Insensitive,
+            quoted: IdentifierCase::Mixed,
+            quote: "\"".into(),
+        }
+    }
+}
+
 impl AdapterCapabilities {
     #[must_use]
     pub fn from_supported(capabilities: impl IntoIterator<Item = AdapterCapability>) -> Self {
@@ -148,6 +173,7 @@ impl AdapterCapabilities {
 
 #[derive(Debug, Clone)]
 pub struct MetadataRequest {
+    pub identity: String,
     pub target: String,
     pub engine: String,
     pub properties: BTreeMap<String, String>,
@@ -194,6 +220,9 @@ pub struct ColumnMetadata {
 pub trait EngineAdapter: Send + Sync {
     fn engine(&self) -> &'static str;
     fn capabilities(&self) -> AdapterCapabilities;
+    fn identifier_capabilities(&self) -> IdentifierCapabilities {
+        IdentifierCapabilities::default()
+    }
     async fn execute(&self, request: QueryRequest, sink: QuerySink) -> Result<(), DriverError>;
     async fn list_catalogs(
         &self,

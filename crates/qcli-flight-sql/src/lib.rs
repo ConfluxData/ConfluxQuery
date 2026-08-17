@@ -1,24 +1,35 @@
 //! Arrow Flight SQL transport for qcli's shared gateway service.
 
+use arrow_array::RecordBatch;
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
-use arrow_flight::sql::metadata::{SqlInfoData, SqlInfoDataBuilder};
+use arrow_flight::sql::metadata::{
+    SqlInfoData, SqlInfoDataBuilder, XdbcTypeInfo, XdbcTypeInfoData, XdbcTypeInfoDataBuilder,
+};
 use arrow_flight::sql::server::FlightSqlService;
 use arrow_flight::sql::{
-    ActionCancelQueryRequest, ActionCancelQueryResult, CommandGetSqlInfo, CommandStatementQuery,
-    ProstMessageExt, SqlInfo, SqlSupportedTransaction, TicketStatementQuery,
+    ActionCancelQueryRequest, ActionCancelQueryResult, CommandGetCatalogs,
+    CommandGetCrossReference, CommandGetDbSchemas, CommandGetExportedKeys, CommandGetImportedKeys,
+    CommandGetPrimaryKeys, CommandGetSqlInfo, CommandGetTableTypes, CommandGetTables,
+    CommandGetXdbcTypeInfo, CommandStatementQuery, Nullable, ProstMessageExt, Searchable, SqlInfo,
+    SqlSupportedCaseSensitivity, SqlSupportedTransaction, TicketStatementQuery, XdbcDataType,
 };
 use arrow_flight::{
     Action, ActionType, FlightDescriptor, FlightEndpoint, FlightInfo, HandshakeRequest,
     HandshakeResponse, Result as FlightActionResult, Ticket,
 };
+use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::{Stream, TryStreamExt, stream};
 use hmac::{Hmac, Mac};
 use prost::Message;
 use qcli_auth::{AuthenticatedPrincipal, AuthenticationErrorKind, Authenticator};
+use qcli_driver_api::{
+    AdapterCapability, ColumnMetadata, IdentifierCapabilities, IdentifierCase, MetadataRequest,
+    ObjectKind,
+};
 use qcli_service::{GatewayService, ResultBatchReader, ServiceError, ServiceErrorKind};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -222,6 +233,7 @@ pub async fn bind_flight(
 pub struct QcliFlightSql {
     gateway: GatewayService,
     sql_info: Arc<SqlInfoData>,
+    xdbc_info: Arc<XdbcTypeInfoData>,
     tickets: Arc<TicketSigner>,
     sessions: Arc<SessionSigner>,
     ticket_ttl: Duration,
@@ -259,22 +271,10 @@ impl QcliFlightSql {
         session_ttl: Duration,
         max_flight_data_bytes: usize,
     ) -> Self {
-        let mut builder = SqlInfoDataBuilder::new();
-        builder.append(SqlInfo::FlightSqlServerName, "qcli");
-        builder.append(SqlInfo::FlightSqlServerVersion, env!("CARGO_PKG_VERSION"));
-        builder.append(SqlInfo::FlightSqlServerArrowVersion, "1.3");
-        builder.append(SqlInfo::FlightSqlServerReadOnly, false);
-        builder.append(SqlInfo::FlightSqlServerSql, true);
-        builder.append(SqlInfo::FlightSqlServerSubstrait, false);
-        builder.append(
-            SqlInfo::FlightSqlServerTransaction,
-            SqlSupportedTransaction::None as i32,
-        );
-        builder.append(SqlInfo::FlightSqlServerCancel, true);
-        builder.append(SqlInfo::FlightSqlServerBulkIngestion, false);
         Self {
             gateway,
-            sql_info: Arc::new(builder.build().expect("static SQL info values are valid")),
+            sql_info: Arc::new(sql_info_data(true, &IdentifierCapabilities::default())),
+            xdbc_info: Arc::new(xdbc_type_info()),
             tickets: Arc::new(TicketSigner::new()),
             sessions: Arc::new(SessionSigner::new()),
             ticket_ttl,
@@ -500,6 +500,34 @@ impl QcliFlightSql {
         );
         Ok(response)
     }
+
+    fn metadata_request<T>(
+        &self,
+        request: &Request<T>,
+        principal: &AuthenticatedPrincipal,
+        catalog: Option<String>,
+        schema: Option<String>,
+    ) -> Result<MetadataRequest, Status> {
+        if let Some(session) = self.session_from_request(request, principal)? {
+            self.gateway
+                .session_metadata_request(principal, &session.session_id, catalog, schema, None)
+                .map_err(service_error_status)
+        } else {
+            let target = request
+                .metadata()
+                .get("qcli-target")
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    Status::invalid_argument(
+                        "qcli-target metadata or a Flight session cookie is required",
+                    )
+                })?;
+            self.gateway
+                .target_metadata_request(principal, target, catalog, schema, None)
+                .map_err(service_error_status)
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -618,12 +646,102 @@ impl FlightSqlService for QcliFlightSql {
         Ok(response)
     }
 
+    async fn get_flight_info_catalogs(
+        &self,
+        query: CommandGetCatalogs,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        let schema = query.into_builder().schema();
+        metadata_flight_info(&query, &schema, request.into_inner())
+    }
+
+    async fn get_flight_info_schemas(
+        &self,
+        query: CommandGetDbSchemas,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        let schema = query.clone().into_builder().schema();
+        metadata_flight_info(&query, &schema, request.into_inner())
+    }
+
+    async fn get_flight_info_tables(
+        &self,
+        query: CommandGetTables,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        let schema = query.clone().into_builder().schema();
+        metadata_flight_info(&query, &schema, request.into_inner())
+    }
+
+    async fn get_flight_info_table_types(
+        &self,
+        query: CommandGetTableTypes,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        let schema = query.into_builder().schema();
+        metadata_flight_info(&query, &schema, request.into_inner())
+    }
+
+    async fn get_flight_info_xdbc_type_info(
+        &self,
+        query: CommandGetXdbcTypeInfo,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        let schema = query.into_builder(&self.xdbc_info).schema();
+        metadata_flight_info(&query, &schema, request.into_inner())
+    }
+
+    async fn get_flight_info_primary_keys(
+        &self,
+        query: CommandGetPrimaryKeys,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        metadata_flight_info(&query, &primary_key_schema(), request.into_inner())
+    }
+
+    async fn get_flight_info_exported_keys(
+        &self,
+        query: CommandGetExportedKeys,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        metadata_flight_info(&query, &foreign_key_schema(), request.into_inner())
+    }
+
+    async fn get_flight_info_imported_keys(
+        &self,
+        query: CommandGetImportedKeys,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        metadata_flight_info(&query, &foreign_key_schema(), request.into_inner())
+    }
+
+    async fn get_flight_info_cross_reference(
+        &self,
+        query: CommandGetCrossReference,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        metadata_flight_info(&query, &foreign_key_schema(), request.into_inner())
+    }
+
     async fn do_get_sql_info(
         &self,
         query: CommandGetSqlInfo,
-        _request: Request<Ticket>,
+        request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        let builder = query.into_builder(&self.sql_info);
+        let principal = required_principal(&request)?.clone();
+        let metadata_request = self.metadata_request(&request, &principal, None, None)?;
+        let metadata = self.gateway.metadata();
+        let capabilities = metadata
+            .capabilities(&metadata_request.engine)
+            .ok_or_else(|| Status::unimplemented("adapter capabilities are unavailable"))?;
+        let identifiers = metadata
+            .identifier_capabilities(&metadata_request.engine)
+            .unwrap_or_default();
+        let sql_info = sql_info_data(
+            capabilities.supports(AdapterCapability::CancelQuery),
+            &identifiers,
+        );
+        let builder = query.into_builder(&sql_info);
         let schema = builder.schema();
         let batch = builder.build();
         let stream = FlightDataEncoderBuilder::new()
@@ -631,6 +749,197 @@ impl FlightSqlService for QcliFlightSql {
             .build(stream::once(async { batch }))
             .map_err(Status::from);
         Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn do_get_catalogs(
+        &self,
+        query: CommandGetCatalogs,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        let principal = required_principal(&request)?.clone();
+        let metadata_request = self.metadata_request(&request, &principal, None, None)?;
+        let catalogs = self
+            .gateway
+            .metadata()
+            .catalogs(metadata_request)
+            .await
+            .map_err(driver_status)?;
+        let mut builder = query.into_builder();
+        for catalog in catalogs {
+            builder.append(catalog.name);
+        }
+        encode_metadata_batch(
+            builder.build().map_err(Status::from)?,
+            self.max_flight_data_bytes,
+        )
+    }
+
+    async fn do_get_schemas(
+        &self,
+        query: CommandGetDbSchemas,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        let principal = required_principal(&request)?.clone();
+        let metadata_request =
+            self.metadata_request(&request, &principal, query.catalog.clone(), None)?;
+        let schemas = self
+            .gateway
+            .metadata()
+            .schemas(metadata_request)
+            .await
+            .map_err(driver_status)?;
+        let mut builder = query.into_builder();
+        for schema in schemas {
+            builder.append(schema.catalog.unwrap_or_default(), schema.name);
+        }
+        encode_metadata_batch(
+            builder.build().map_err(Status::from)?,
+            self.max_flight_data_bytes,
+        )
+    }
+
+    async fn do_get_tables(
+        &self,
+        query: CommandGetTables,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        let principal = required_principal(&request)?.clone();
+        let metadata_request =
+            self.metadata_request(&request, &principal, query.catalog.clone(), None)?;
+        let metadata = self.gateway.metadata();
+        let objects = metadata
+            .objects(metadata_request.clone())
+            .await
+            .map_err(driver_status)?;
+        let mut builder = query.into_builder();
+        for object in objects {
+            let schema = if builder.schema().fields().len() == 5 {
+                let mut describe = metadata_request.clone();
+                describe.catalog.clone_from(&object.catalog);
+                describe.schema.clone_from(&object.schema);
+                let columns = metadata
+                    .describe(describe, &object.name)
+                    .await
+                    .map_err(driver_status)?;
+                columns_schema(
+                    object.catalog.as_deref(),
+                    object.schema.as_deref(),
+                    &object.name,
+                    &columns,
+                )
+            } else {
+                Schema::empty()
+            };
+            builder
+                .append(
+                    object.catalog.unwrap_or_default(),
+                    object.schema.unwrap_or_default(),
+                    object.name,
+                    table_type(object.kind),
+                    &schema,
+                )
+                .map_err(Status::from)?;
+        }
+        encode_metadata_batch(
+            builder.build().map_err(Status::from)?,
+            self.max_flight_data_bytes,
+        )
+    }
+
+    async fn do_get_table_types(
+        &self,
+        query: CommandGetTableTypes,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        let principal = required_principal(&request)?.clone();
+        let metadata_request = self.metadata_request(&request, &principal, None, None)?;
+        let objects = self
+            .gateway
+            .metadata()
+            .objects(metadata_request)
+            .await
+            .map_err(driver_status)?;
+        let mut types = objects
+            .into_iter()
+            .map(|object| table_type(object.kind))
+            .collect::<std::collections::BTreeSet<_>>();
+        if types.is_empty() {
+            types.extend(["TABLE", "VIEW"]);
+        }
+        let mut builder = query.into_builder();
+        for table_type in types {
+            builder.append(table_type);
+        }
+        encode_metadata_batch(
+            builder.build().map_err(Status::from)?,
+            self.max_flight_data_bytes,
+        )
+    }
+
+    async fn do_get_xdbc_type_info(
+        &self,
+        query: CommandGetXdbcTypeInfo,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        let principal = required_principal(&request)?.clone();
+        self.metadata_request(&request, &principal, None, None)?;
+        let batch = query
+            .into_builder(&self.xdbc_info)
+            .build()
+            .map_err(Status::from)?;
+        encode_metadata_batch(batch, self.max_flight_data_bytes)
+    }
+
+    async fn do_get_primary_keys(
+        &self,
+        query: CommandGetPrimaryKeys,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        let principal = required_principal(&request)?.clone();
+        self.metadata_request(&request, &principal, query.catalog, query.db_schema)?;
+        encode_metadata_batch(
+            empty_batch(primary_key_schema()),
+            self.max_flight_data_bytes,
+        )
+    }
+
+    async fn do_get_exported_keys(
+        &self,
+        query: CommandGetExportedKeys,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        let principal = required_principal(&request)?.clone();
+        self.metadata_request(&request, &principal, query.catalog, query.db_schema)?;
+        encode_metadata_batch(
+            empty_batch(foreign_key_schema()),
+            self.max_flight_data_bytes,
+        )
+    }
+
+    async fn do_get_imported_keys(
+        &self,
+        query: CommandGetImportedKeys,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        let principal = required_principal(&request)?.clone();
+        self.metadata_request(&request, &principal, query.catalog, query.db_schema)?;
+        encode_metadata_batch(
+            empty_batch(foreign_key_schema()),
+            self.max_flight_data_bytes,
+        )
+    }
+
+    async fn do_get_cross_reference(
+        &self,
+        query: CommandGetCrossReference,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        let principal = required_principal(&request)?.clone();
+        self.metadata_request(&request, &principal, query.pk_catalog, query.pk_db_schema)?;
+        encode_metadata_batch(
+            empty_batch(foreign_key_schema()),
+            self.max_flight_data_bytes,
+        )
     }
 
     async fn do_get_statement(
@@ -859,6 +1168,329 @@ pub fn principal(request: &Request<impl Sized>) -> Option<&AuthenticatedPrincipa
 
 fn required_principal<T>(request: &Request<T>) -> Result<&AuthenticatedPrincipal, Status> {
     principal(request).ok_or_else(|| Status::unauthenticated("authenticated principal is missing"))
+}
+
+fn metadata_flight_info<M: ProstMessageExt>(
+    query: &M,
+    schema: &SchemaRef,
+    descriptor: FlightDescriptor,
+) -> Result<Response<FlightInfo>, Status> {
+    let ticket = Ticket::new(query.as_any().encode_to_vec());
+    let info = FlightInfo::new()
+        .try_with_schema(schema.as_ref())
+        .map_err(|error| Status::internal(error.to_string()))?
+        .with_descriptor(descriptor)
+        .with_endpoint(FlightEndpoint::new().with_ticket(ticket))
+        .with_total_records(-1)
+        .with_total_bytes(-1)
+        .with_ordered(true);
+    Ok(Response::new(info))
+}
+
+#[allow(clippy::type_complexity, clippy::unnecessary_wraps)]
+fn encode_metadata_batch(
+    batch: RecordBatch,
+    max_bytes: usize,
+) -> Result<
+    Response<Pin<Box<dyn Stream<Item = Result<arrow_flight::FlightData, Status>> + Send>>>,
+    Status,
+> {
+    let schema = batch.schema();
+    let stream = FlightDataEncoderBuilder::new()
+        .with_schema(schema)
+        .with_max_flight_data_size(max_bytes)
+        .build(stream::once(async { Ok(batch) }))
+        .map_err(Status::from);
+    Ok(Response::new(Box::pin(stream)))
+}
+
+fn driver_status(error: qcli_driver_api::DriverError) -> Status {
+    if error.code == "unsupported_capability" {
+        Status::unimplemented(error.message)
+    } else {
+        Status::unavailable(error.message)
+    }
+}
+
+fn table_type(kind: ObjectKind) -> &'static str {
+    match kind {
+        ObjectKind::Table => "TABLE",
+        ObjectKind::View => "VIEW",
+        ObjectKind::Other => "OTHER",
+    }
+}
+
+fn columns_schema(
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    table: &str,
+    columns: &[ColumnMetadata],
+) -> Schema {
+    let fields = columns.iter().map(|column| {
+        let mut metadata = std::collections::HashMap::from([
+            (
+                "ARROW:FLIGHT:SQL:CATALOG_NAME".into(),
+                catalog.unwrap_or_default().into(),
+            ),
+            (
+                "ARROW:FLIGHT:SQL:DB_SCHEMA_NAME".into(),
+                schema.unwrap_or_default().into(),
+            ),
+            ("ARROW:FLIGHT:SQL:TABLE_NAME".into(), table.into()),
+            (
+                "ARROW:FLIGHT:SQL:TYPE_NAME".into(),
+                column.data_type.clone(),
+            ),
+        ]);
+        if let Some(comment) = &column.comment {
+            metadata.insert("ARROW:FLIGHT:SQL:REMARKS".into(), comment.clone());
+        }
+        Field::new(
+            &column.name,
+            arrow_type(&column.data_type),
+            column.nullable.unwrap_or(true),
+        )
+        .with_metadata(metadata)
+    });
+    Schema::new(fields.collect::<Vec<_>>())
+}
+
+fn arrow_type(native: &str) -> DataType {
+    let normalized = native.trim().to_ascii_lowercase();
+    if let Some(inner) = type_arguments(&normalized, "array") {
+        return DataType::List(Arc::new(Field::new_list_field(arrow_type(inner), true)));
+    }
+    if normalized == "array" {
+        return DataType::List(Arc::new(Field::new_list_field(DataType::Utf8, true)));
+    }
+    if let Some(inner) = type_arguments(&normalized, "map") {
+        let parts = split_top_level(inner);
+        if parts.len() == 2 {
+            return DataType::Map(
+                Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(
+                        vec![
+                            Arc::new(Field::new("key", arrow_type(parts[0]), false)),
+                            Arc::new(Field::new("value", arrow_type(parts[1]), true)),
+                        ]
+                        .into(),
+                    ),
+                    false,
+                )),
+                false,
+            );
+        }
+    }
+    if normalized == "object" || normalized == "map" {
+        return DataType::Map(
+            Arc::new(Field::new(
+                "entries",
+                DataType::Struct(
+                    vec![
+                        Arc::new(Field::new("key", DataType::Utf8, false)),
+                        Arc::new(Field::new("value", DataType::Utf8, true)),
+                    ]
+                    .into(),
+                ),
+                false,
+            )),
+            false,
+        );
+    }
+    let base = normalized
+        .split(['(', '<'])
+        .next()
+        .unwrap_or(&normalized)
+        .trim();
+    match base {
+        "boolean" | "bool" => DataType::Boolean,
+        "tinyint" | "byteint" => DataType::Int8,
+        "smallint" => DataType::Int16,
+        "integer" | "int" => DataType::Int32,
+        "bigint" | "long" => DataType::Int64,
+        "real" | "float" => DataType::Float32,
+        "double" | "double precision" => DataType::Float64,
+        "binary" | "varbinary" => DataType::Binary,
+        "date" => DataType::Date32,
+        "timestamp" | "timestamp_ntz" | "timestamp_ltz" | "timestamp_tz" => {
+            DataType::Timestamp(TimeUnit::Microsecond, None)
+        }
+        "decimal" | "numeric" | "number" => {
+            let (precision, scale) = decimal_shape(&normalized).unwrap_or((38, 9));
+            DataType::Decimal128(precision, scale)
+        }
+        _ => DataType::Utf8,
+    }
+}
+
+fn type_arguments<'a>(value: &'a str, name: &str) -> Option<&'a str> {
+    let suffix = value.strip_prefix(name)?.trim();
+    if (suffix.starts_with('(') && suffix.ends_with(')'))
+        || (suffix.starts_with('<') && suffix.ends_with('>'))
+    {
+        Some(&suffix[1..suffix.len() - 1])
+    } else {
+        None
+    }
+}
+
+fn split_top_level(value: &str) -> Vec<&str> {
+    let mut depth = 0_i32;
+    let mut start = 0;
+    let mut output = Vec::new();
+    for (index, character) in value.char_indices() {
+        match character {
+            '(' | '<' => depth += 1,
+            ')' | '>' => depth -= 1,
+            ',' if depth == 0 => {
+                output.push(value[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    output.push(value[start..].trim());
+    output
+}
+
+fn decimal_shape(value: &str) -> Option<(u8, i8)> {
+    let values = value
+        .split_once('(')?
+        .1
+        .trim_end_matches(')')
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    let precision = values.first()?.parse().ok()?;
+    let scale = values.get(1).unwrap_or(&"0").parse().ok()?;
+    Some((precision, scale))
+}
+
+fn primary_key_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("catalog_name", DataType::Utf8, true),
+        Field::new("db_schema_name", DataType::Utf8, true),
+        Field::new("table_name", DataType::Utf8, false),
+        Field::new("column_name", DataType::Utf8, false),
+        Field::new("key_name", DataType::Utf8, true),
+        Field::new("key_sequence", DataType::Int32, false),
+    ]))
+}
+
+fn foreign_key_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("pk_catalog_name", DataType::Utf8, true),
+        Field::new("pk_db_schema_name", DataType::Utf8, true),
+        Field::new("pk_table_name", DataType::Utf8, false),
+        Field::new("pk_column_name", DataType::Utf8, false),
+        Field::new("fk_catalog_name", DataType::Utf8, true),
+        Field::new("fk_db_schema_name", DataType::Utf8, true),
+        Field::new("fk_table_name", DataType::Utf8, false),
+        Field::new("fk_column_name", DataType::Utf8, false),
+        Field::new("key_sequence", DataType::Int32, false),
+        Field::new("fk_key_name", DataType::Utf8, true),
+        Field::new("pk_key_name", DataType::Utf8, true),
+        Field::new("update_rule", DataType::UInt8, false),
+        Field::new("delete_rule", DataType::UInt8, false),
+    ]))
+}
+
+fn empty_batch(schema: SchemaRef) -> RecordBatch {
+    RecordBatch::new_empty(schema)
+}
+
+fn xdbc_type_info() -> XdbcTypeInfoData {
+    let mut builder = XdbcTypeInfoDataBuilder::new();
+    for (name, data_type, size, case_sensitive, radix) in [
+        ("BOOLEAN", XdbcDataType::XdbcBit, Some(1), false, None),
+        (
+            "INTEGER",
+            XdbcDataType::XdbcInteger,
+            Some(32),
+            false,
+            Some(2),
+        ),
+        ("BIGINT", XdbcDataType::XdbcBigint, Some(64), false, Some(2)),
+        ("DOUBLE", XdbcDataType::XdbcDouble, Some(53), false, Some(2)),
+        (
+            "DECIMAL",
+            XdbcDataType::XdbcDecimal,
+            Some(38),
+            false,
+            Some(10),
+        ),
+        ("VARCHAR", XdbcDataType::XdbcVarchar, None, true, None),
+        ("VARBINARY", XdbcDataType::XdbcVarbinary, None, false, None),
+        ("DATE", XdbcDataType::XdbcDate, Some(10), false, None),
+        (
+            "TIMESTAMP",
+            XdbcDataType::XdbcTimestamp,
+            Some(29),
+            false,
+            None,
+        ),
+    ] {
+        builder.append(XdbcTypeInfo {
+            type_name: name.into(),
+            data_type,
+            column_size: size,
+            literal_prefix: None,
+            literal_suffix: None,
+            create_params: None,
+            nullable: Nullable::NullabilityNullable,
+            case_sensitive,
+            searchable: Searchable::Full,
+            unsigned_attribute: Some(false),
+            fixed_prec_scale: data_type == XdbcDataType::XdbcDecimal,
+            auto_increment: Some(false),
+            local_type_name: Some(name.into()),
+            minimum_scale: None,
+            maximum_scale: None,
+            sql_data_type: data_type,
+            datetime_subcode: None,
+            num_prec_radix: radix,
+            interval_precision: None,
+        });
+    }
+    builder.build().expect("static XDBC type metadata is valid")
+}
+
+fn sql_info_data(cancel: bool, identifiers: &IdentifierCapabilities) -> SqlInfoData {
+    let mut builder = SqlInfoDataBuilder::new();
+    builder.append(SqlInfo::FlightSqlServerName, "qcli");
+    builder.append(SqlInfo::FlightSqlServerVersion, env!("CARGO_PKG_VERSION"));
+    builder.append(SqlInfo::FlightSqlServerArrowVersion, "1.3");
+    builder.append(SqlInfo::FlightSqlServerReadOnly, false);
+    builder.append(SqlInfo::FlightSqlServerSql, true);
+    builder.append(SqlInfo::FlightSqlServerSubstrait, false);
+    builder.append(
+        SqlInfo::FlightSqlServerTransaction,
+        SqlSupportedTransaction::None as i32,
+    );
+    builder.append(SqlInfo::FlightSqlServerCancel, cancel);
+    builder.append(SqlInfo::FlightSqlServerBulkIngestion, false);
+    builder.append(
+        SqlInfo::SqlIdentifierCase,
+        sql_identifier_case(identifiers.unquoted) as i32,
+    );
+    builder.append(SqlInfo::SqlIdentifierQuoteChar, identifiers.quote.as_str());
+    builder.append(
+        SqlInfo::SqlQuotedIdentifierCase,
+        sql_identifier_case(identifiers.quoted) as i32,
+    );
+    builder.build().expect("static SQL info values are valid")
+}
+
+fn sql_identifier_case(value: IdentifierCase) -> SqlSupportedCaseSensitivity {
+    match value {
+        IdentifierCase::Insensitive => {
+            SqlSupportedCaseSensitivity::SqlCaseSensitivityCaseInsensitive
+        }
+        IdentifierCase::Upper => SqlSupportedCaseSensitivity::SqlCaseSensitivityUppercase,
+        IdentifierCase::Lower => SqlSupportedCaseSensitivity::SqlCaseSensitivityLowercase,
+        IdentifierCase::Mixed => SqlSupportedCaseSensitivity::SqlCaseSensitivityUnknown,
+    }
 }
 
 async fn wait_for_schema(
@@ -1263,6 +1895,7 @@ mod tests {
     async fn authenticated_client_discovers_and_reads_sql_info() {
         let (mut client, shutdown, task) = server(FlightServerConfig::default()).await;
         client.set_token("valid-key".into());
+        client.set_header("qcli-target", "demo");
         let info = client
             .get_sql_info(vec![
                 SqlInfo::FlightSqlServerName,
@@ -1331,6 +1964,88 @@ mod tests {
             }
             assert_eq!(i64::try_from(rows).unwrap(), info.total_records);
         }
+        shutdown.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    async fn metadata_batches(
+        client: &mut FlightSqlServiceClient<Channel>,
+        info: &FlightInfo,
+    ) -> Vec<RecordBatch> {
+        let mut stream = client
+            .do_get(info.endpoint[0].ticket.clone().unwrap())
+            .await
+            .unwrap();
+        let mut batches = Vec::new();
+        while let Some(batch) = stream.try_next().await.unwrap() {
+            batches.push(batch);
+        }
+        batches
+    }
+
+    #[tokio::test]
+    async fn target_aware_metadata_uses_exact_flight_sql_schemas() {
+        let (mut client, shutdown, task) = server(FlightServerConfig::default()).await;
+        client.set_token("valid-key".into());
+        client.set_header("qcli-target", "demo");
+
+        let catalogs = client.get_catalogs().await.unwrap();
+        let batches = metadata_batches(&mut client, &catalogs).await;
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+        assert_eq!(
+            catalogs.clone().try_decode_schema().unwrap(),
+            batches[0].schema().as_ref().clone()
+        );
+
+        let schemas = client
+            .get_db_schemas(CommandGetDbSchemas {
+                catalog: Some("demo".into()),
+                db_schema_filter_pattern: Some("pub%".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            metadata_batches(&mut client, &schemas).await[0].num_rows(),
+            1
+        );
+
+        let tables = client
+            .get_tables(CommandGetTables {
+                catalog: None,
+                db_schema_filter_pattern: None,
+                table_name_filter_pattern: Some("event%".into()),
+                table_types: vec!["TABLE".into(), "VIEW".into()],
+                include_schema: true,
+            })
+            .await
+            .unwrap();
+        let table_batches = metadata_batches(&mut client, &tables).await;
+        assert_eq!(table_batches[0].num_rows(), 2);
+        assert_eq!(table_batches[0].num_columns(), 5);
+
+        let types = client.get_table_types().await.unwrap();
+        assert_eq!(metadata_batches(&mut client, &types).await[0].num_rows(), 2);
+        let xdbc = client
+            .get_xdbc_type_info(CommandGetXdbcTypeInfo { data_type: None })
+            .await
+            .unwrap();
+        assert!(metadata_batches(&mut client, &xdbc).await[0].num_rows() >= 9);
+
+        let keys = client
+            .get_primary_keys(CommandGetPrimaryKeys {
+                catalog: None,
+                db_schema: None,
+                table: "events".into(),
+            })
+            .await
+            .unwrap();
+        let key_batches = metadata_batches(&mut client, &keys).await;
+        assert_eq!(
+            keys.clone().try_decode_schema().unwrap(),
+            primary_key_schema().as_ref().clone()
+        );
+        assert!(key_batches.is_empty());
+
         shutdown.send(()).unwrap();
         task.await.unwrap().unwrap();
     }

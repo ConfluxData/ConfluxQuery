@@ -642,6 +642,7 @@ fn context_prompt(snapshot: &SessionSnapshot) -> String {
 
 fn metadata_request(snapshot: &SessionSnapshot, pattern: Option<&str>) -> MetadataRequest {
     MetadataRequest {
+        identity: "local-cli".into(),
         target: snapshot.target.clone(),
         engine: snapshot.engine.clone(),
         properties: snapshot.properties.clone(),
@@ -658,6 +659,7 @@ fn request_from_target(target: &ResolvedTarget, pattern: Option<&str>) -> Metada
         .map(|(name, value)| (name.clone(), value.expose().to_owned()))
         .collect::<BTreeMap<_, _>>();
     MetadataRequest {
+        identity: "local-cli".into(),
         target: target.name.clone(),
         engine: target.engine.clone(),
         catalog: properties.get("catalog").cloned(),

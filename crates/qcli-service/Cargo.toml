@@ -14,6 +14,7 @@ qcli-auth = { version = "0.1.0", path = "../qcli-auth" }
 qcli-config = { version = "0.1.0", path = "../qcli-config" }
 qcli-core = { version = "0.1.0", path = "../qcli-core" }
 qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
+qcli-metadata = { version = "0.1.0", path = "../qcli-metadata" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

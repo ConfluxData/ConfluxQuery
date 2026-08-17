@@ -2304,6 +2304,7 @@ dependencies = [
  "qcli-core",
  "qcli-driver-api",
  "qcli-driver-demo",
+ "qcli-metadata",
  "serde",
  "serde_json",
  "tokio",
