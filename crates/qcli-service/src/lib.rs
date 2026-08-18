@@ -205,6 +205,7 @@ pub struct PreparedStatementSnapshot {
 struct PreparedStatementRecord {
     owner: String,
     session_id: String,
+    owns_session: bool,
     sql: String,
     dataset_schema: SchemaRef,
     parameter_schema: SchemaRef,
@@ -548,7 +549,7 @@ impl GatewayService {
         }
     }
 
-    pub fn create_prepared_statement(
+    pub async fn create_prepared_statement(
         &self,
         principal: &AuthenticatedPrincipal,
         session_id: &str,
@@ -581,6 +582,12 @@ impl GatewayService {
                 "prepared statements are not supported by this adapter",
             ));
         }
+        let metadata = self
+            .state
+            .queries
+            .prepare(session.clone(), sql.clone())
+            .await
+            .map_err(|error| core_error(&error))?;
         self.cleanup_expired();
         let mut prepared = self.state.prepared.lock().expect("prepared mutex poisoned");
         if prepared.len() >= self.state.limits.max_prepared_statements {
@@ -596,9 +603,10 @@ impl GatewayService {
             PreparedStatementRecord {
                 owner: principal.id.clone(),
                 session_id: session_id.into(),
+                owns_session: false,
                 sql,
-                dataset_schema: Arc::new(Schema::empty()),
-                parameter_schema: Arc::new(Schema::empty()),
+                dataset_schema: metadata.dataset_schema,
+                parameter_schema: metadata.parameter_schema,
                 parameters: Vec::new(),
                 last_access: Instant::now(),
             },
@@ -607,6 +615,34 @@ impl GatewayService {
             &handle,
             prepared.get(&handle).expect("new prepared handle exists"),
         ))
+    }
+
+    pub async fn create_stateless_prepared_statement(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        target_name: &str,
+        sql: String,
+    ) -> Result<PreparedStatementSnapshot, ServiceError> {
+        let session = self.create_session(principal, target_name, BTreeMap::new())?;
+        match self
+            .create_prepared_statement(principal, &session.id, sql)
+            .await
+        {
+            Ok(snapshot) => {
+                self.state
+                    .prepared
+                    .lock()
+                    .expect("prepared mutex poisoned")
+                    .get_mut(&snapshot.handle)
+                    .expect("new prepared handle exists")
+                    .owns_session = true;
+                Ok(snapshot)
+            }
+            Err(error) => {
+                self.close_session(principal, &session.id).ok();
+                Err(error)
+            }
+        }
     }
 
     pub fn bind_prepared_statement(
@@ -717,16 +753,24 @@ impl GatewayService {
         principal: &AuthenticatedPrincipal,
         handle: &str,
     ) -> Result<(), ServiceError> {
-        let mut prepared = self.state.prepared.lock().expect("prepared mutex poisoned");
-        if prepared
-            .get(handle)
-            .is_some_and(|record| record.owner == principal.id)
-        {
-            prepared.remove(handle);
-            Ok(())
-        } else {
-            Err(prepared_not_found())
+        let removed = {
+            let mut prepared = self.state.prepared.lock().expect("prepared mutex poisoned");
+            if prepared
+                .get(handle)
+                .is_some_and(|record| record.owner == principal.id)
+            {
+                prepared.remove(handle)
+            } else {
+                None
+            }
+        };
+        let Some(record) = removed else {
+            return Err(prepared_not_found());
+        };
+        if record.owns_session {
+            self.close_session(principal, &record.session_id)?;
         }
+        Ok(())
     }
 
     pub fn query(
@@ -905,13 +949,49 @@ impl GatewayService {
 
     pub fn cleanup_expired(&self) {
         let now = Instant::now();
-        self.state
-            .prepared
-            .lock()
-            .expect("prepared mutex poisoned")
-            .retain(|_, record| {
-                now.duration_since(record.last_access) < self.state.limits.prepared_statement_ttl
-            });
+        let expired_prepared_sessions = {
+            let mut expired = Vec::new();
+            self.state
+                .prepared
+                .lock()
+                .expect("prepared mutex poisoned")
+                .retain(|_, record| {
+                    let keep = now.duration_since(record.last_access)
+                        < self.state.limits.prepared_statement_ttl;
+                    if !keep && record.owns_session {
+                        expired.push((record.session_id.clone(), record.owner.clone()));
+                    }
+                    keep
+                });
+            expired
+        };
+        for (session_id, principal) in expired_prepared_sessions {
+            self.state
+                .records
+                .lock()
+                .expect("query registry mutex poisoned")
+                .values()
+                .filter(|record| record.session_id == session_id)
+                .for_each(|record| record.cancel.cancel());
+            self.state.sessions.close(&session_id).ok();
+            self.state
+                .session_owners
+                .lock()
+                .expect("session owner mutex poisoned")
+                .remove(&session_id);
+            self.state
+                .audit
+                .lock()
+                .expect("audit sink mutex poisoned")
+                .record(&AuditEvent {
+                    action: "session.expire".into(),
+                    outcome: "prepared_handle_expired".into(),
+                    principal: Some(principal),
+                    target: None,
+                    session_id: Some(session_id),
+                    query_id: None,
+                });
+        }
         self.state
             .records
             .lock()
@@ -1848,6 +1928,7 @@ mod tests {
             .unwrap();
         let prepared = service
             .create_prepared_statement(&analyst, &session.id, "select ?".into())
+            .await
             .unwrap();
         let decimal = Decimal128Array::from(vec![Some(12_345), None])
             .with_precision_and_scale(12, 2)
@@ -1915,6 +1996,7 @@ mod tests {
             .unwrap();
         let prepared = service
             .create_prepared_statement(&analyst, &session.id, "select ?".into())
+            .await
             .unwrap();
         assert_eq!(
             service
@@ -1935,11 +2017,32 @@ mod tests {
         );
         let expiring = service
             .create_prepared_statement(&analyst, &session.id, "select ?".into())
+            .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(5)).await;
         assert_eq!(
             service
                 .prepared_statement(&analyst, &expiring.handle)
+                .unwrap_err()
+                .kind,
+            ServiceErrorKind::NotFound
+        );
+
+        let transient = service
+            .create_stateless_prepared_statement(&analyst, "demo", "select ?".into())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert_eq!(
+            service
+                .prepared_statement(&analyst, &transient.handle)
+                .unwrap_err()
+                .kind,
+            ServiceErrorKind::NotFound
+        );
+        assert_eq!(
+            service
+                .session(&analyst, &transient.session_id)
                 .unwrap_err()
                 .kind,
             ServiceErrorKind::NotFound

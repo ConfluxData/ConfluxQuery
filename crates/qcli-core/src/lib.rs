@@ -4,7 +4,8 @@ use arrow_array::RecordBatch;
 use chrono::Local;
 use qcli_config::ResolvedTarget;
 use qcli_driver_api::{
-    CancellationSignal, DriverError, EngineAdapter, QueryEvent, QueryRequest, QuerySink, QueryState,
+    CancellationSignal, DriverError, EngineAdapter, PreparedStatementMetadata, QueryEvent,
+    QueryRequest, QuerySink, QueryState,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -439,6 +440,36 @@ impl QueryService {
         parameters: Vec<RecordBatch>,
     ) -> Result<QueryHandle, CoreError> {
         self.submit_with_parameters(snapshot, sql, Some(parameters))
+    }
+
+    /// Prepare SQL and return the adapter's best-known native schemas.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter lookup or native preparation error.
+    pub async fn prepare(
+        &self,
+        snapshot: SessionSnapshot,
+        sql: String,
+    ) -> Result<PreparedStatementMetadata, CoreError> {
+        let adapter = self
+            .adapters
+            .get(&snapshot.engine)
+            .cloned()
+            .ok_or_else(|| CoreError::AdapterNotFound(snapshot.engine.clone()))?;
+        let id = format!("qcli_{:016x}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        adapter
+            .prepare(QueryRequest {
+                qcli_query_id: id,
+                session_id: snapshot.id,
+                session_version: snapshot.version,
+                target: snapshot.target,
+                engine: snapshot.engine,
+                sql,
+                properties: snapshot.properties,
+            })
+            .await
+            .map_err(CoreError::Driver)
     }
 
     fn submit_with_parameters(

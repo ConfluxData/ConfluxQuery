@@ -659,11 +659,22 @@ impl FlightSqlService for QcliFlightSql {
         let principal = required_principal(&request)?.clone();
         let handle = prepared_handle(&query.prepared_statement_handle)?;
         let descriptor = request.get_ref().clone();
+        let prepared = self
+            .gateway
+            .prepared_statement(&principal, handle)
+            .map_err(service_error_status)?;
         let status = self
             .gateway
             .execute_prepared_statement(&principal, handle)
             .map_err(service_error_status)?;
-        query_flight_info(self, &principal, status, descriptor, None).await
+        query_flight_info(
+            self,
+            &principal,
+            &status,
+            &prepared.dataset_schema,
+            descriptor,
+            None,
+        )
     }
 
     async fn get_flight_info_catalogs(
@@ -1078,15 +1089,26 @@ impl FlightSqlService for QcliFlightSql {
             return Err(Status::unimplemented("transactions are not supported"));
         }
         let principal = required_principal(&request)?.clone();
-        let session = self
-            .session_from_request(&request, &principal)?
-            .ok_or_else(|| {
-                Status::failed_precondition("prepared statements require a Flight session")
-            })?;
-        let prepared = self
-            .gateway
-            .create_prepared_statement(&principal, &session.session_id, query.query)
-            .map_err(service_error_status)?;
+        let prepared = if let Some(session) = self.session_from_request(&request, &principal)? {
+            self.gateway
+                .create_prepared_statement(&principal, &session.session_id, query.query)
+                .await
+        } else {
+            let target = request
+                .metadata()
+                .get("qcli-target")
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    Status::invalid_argument(
+                        "qcli-target metadata or a Flight session cookie is required",
+                    )
+                })?;
+            self.gateway
+                .create_stateless_prepared_statement(&principal, target, query.query)
+                .await
+        }
+        .map_err(service_error_status)?;
         Ok(ActionCreatePreparedStatementResult {
             prepared_statement_handle: prepared.handle.into_bytes().into(),
             dataset_schema: encode_schema(prepared.dataset_schema.as_ref())?.into(),
@@ -1324,18 +1346,14 @@ fn metadata_flight_info<M: ProstMessageExt>(
     Ok(Response::new(info))
 }
 
-async fn query_flight_info(
+fn query_flight_info(
     service: &QcliFlightSql,
     principal: &AuthenticatedPrincipal,
-    status: qcli_service::QueryStatus,
+    status: &qcli_service::QueryStatus,
+    schema: &SchemaRef,
     descriptor: FlightDescriptor,
     session: Option<&qcli_core::SessionSnapshot>,
 ) -> Result<Response<FlightInfo>, Status> {
-    let status = wait_for_schema(&service.gateway, principal, &status.id).await?;
-    let schema = service
-        .gateway
-        .query_schema(principal, &status.id)
-        .map_err(service_error_status)?;
     let signed = service
         .tickets
         .issue(&principal.id, &status.id, service.ticket_ttl)?;
@@ -2295,35 +2313,11 @@ mod tests {
         set_cookie.split(';').next().unwrap()
     }
 
-    async fn open_demo_session(client: &mut FlightSqlServiceClient<Channel>) -> String {
-        use session_proto::session_option_value::OptionValue;
-        use session_proto::{SessionOptionValue, SetSessionOptionsRequest};
-        let request = SetSessionOptionsRequest {
-            session_options: std::collections::HashMap::from([(
-                "qcli.target".into(),
-                SessionOptionValue {
-                    option_value: Some(OptionValue::StringValue("demo".into())),
-                },
-            )]),
-        };
-        let (cookie, _) = session_action(
-            client,
-            SET_SESSION_OPTIONS,
-            request.encode_to_vec(),
-            "valid-key",
-            None,
-        )
-        .await
-        .unwrap();
-        cookie_header(cookie.as_deref().unwrap()).to_owned()
-    }
-
     #[tokio::test]
     async fn official_client_prepares_binds_executes_updates_and_closes() {
         let (mut client, shutdown, task) = server(FlightServerConfig::default()).await;
-        let cookie = open_demo_session(&mut client).await;
         client.set_token("valid-key".into());
-        client.set_header("cookie", &cookie);
+        client.set_header("qcli-target", "demo");
 
         let decimal = arrow_array::Decimal128Array::from(vec![Some(12_345), None])
             .with_precision_and_scale(12, 2)

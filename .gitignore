@@ -1,4 +1,6 @@
 /target/
+**/target/
+**/__pycache__/
 **/*.rs.bk
 
 # Local qcli configuration, credentials, and runtime state.

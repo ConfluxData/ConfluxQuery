@@ -5,8 +5,8 @@ use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
 use qcli_driver_api::{
     AdapterCapabilities, AdapterCapability, CatalogMetadata, ColumnMetadata, DriverError,
-    EngineAdapter, MetadataRequest, ObjectKind, ObjectMetadata, QueryEvent, QueryRequest,
-    QuerySink, QueryState, SchemaMetadata,
+    EngineAdapter, MetadataRequest, ObjectKind, ObjectMetadata, PreparedStatementMetadata,
+    QueryEvent, QueryRequest, QuerySink, QueryState, SchemaMetadata,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -102,6 +102,35 @@ impl EngineAdapter for DemoAdapter {
         Ok(())
     }
 
+    async fn prepare(
+        &self,
+        request: QueryRequest,
+    ) -> Result<PreparedStatementMetadata, DriverError> {
+        let parameter_count = request.sql.chars().filter(|value| *value == '?').count();
+        let parameter_schema = Arc::new(Schema::new(
+            (0..parameter_count)
+                .map(|index| Field::new(format!("parameter_{index}"), DataType::Utf8, true))
+                .collect::<Vec<_>>(),
+        ));
+        let dataset_schema = if parameter_count > 0 {
+            parameter_schema.clone()
+        } else if request
+            .sql
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("select")
+            || request.sql.trim().eq_ignore_ascii_case("wait-for-cancel")
+        {
+            sample_batch()?.schema()
+        } else {
+            Arc::new(Schema::empty())
+        };
+        Ok(PreparedStatementMetadata {
+            dataset_schema,
+            parameter_schema,
+        })
+    }
+
     async fn execute_prepared(
         &self,
         request: QueryRequest,
@@ -115,8 +144,31 @@ impl EngineAdapter for DemoAdapter {
             .send(QueryEvent::State(QueryState::Running))
             .await
             .ok();
+        let parameter_count = request.sql.chars().filter(|value| *value == '?').count();
         let mut rows = 0;
         for batch in parameters {
+            let batch = if parameter_count > 0 && parameter_count == batch.num_columns() {
+                let schema = Arc::new(Schema::new(
+                    batch
+                        .schema()
+                        .fields()
+                        .iter()
+                        .enumerate()
+                        .map(|(index, field)| {
+                            Field::new(
+                                format!("parameter_{index}"),
+                                field.data_type().clone(),
+                                field.is_nullable(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ));
+                RecordBatch::try_new(schema, batch.columns().to_vec()).map_err(|error| {
+                    DriverError::new("demo_schema", format!("could not name parameters: {error}"))
+                })?
+            } else {
+                batch
+            };
             rows += batch.num_rows();
             sink.batches
                 .send(batch)

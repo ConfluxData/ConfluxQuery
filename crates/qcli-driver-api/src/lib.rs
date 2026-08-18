@@ -1,6 +1,7 @@
 //! Frontend-neutral engine adapter contracts.
 
 use arrow_array::RecordBatch;
+use arrow_schema::{Schema, SchemaRef};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -225,6 +226,12 @@ pub struct ColumnMetadata {
     pub comment: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PreparedStatementMetadata {
+    pub dataset_schema: SchemaRef,
+    pub parameter_schema: SchemaRef,
+}
+
 #[async_trait]
 pub trait EngineAdapter: Send + Sync {
     fn engine(&self) -> &'static str;
@@ -233,6 +240,15 @@ pub trait EngineAdapter: Send + Sync {
         IdentifierCapabilities::default()
     }
     async fn execute(&self, request: QueryRequest, sink: QuerySink) -> Result<(), DriverError>;
+    async fn prepare(
+        &self,
+        _request: QueryRequest,
+    ) -> Result<PreparedStatementMetadata, DriverError> {
+        Ok(PreparedStatementMetadata {
+            dataset_schema: Arc::new(Schema::empty()),
+            parameter_schema: Arc::new(Schema::empty()),
+        })
+    }
     async fn execute_prepared(
         &self,
         request: QueryRequest,

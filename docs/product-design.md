@@ -1255,6 +1255,13 @@ Compatibility levels are explicit:
 - ODBC remains experimental until a selected third-party Flight SQL ODBC driver
   passes the qcli compatibility matrix on supported platforms.
 
+The authoritative version and target matrix is published in
+`docs/connectivity-compatibility.md`. Support is a tested client/target pair,
+not a claim that every client works with every adapter. In particular, JDBC
+requires an exact non-executing preparation schema; adapters that cannot provide
+one remain explicitly unsupported for JDBC while their direct ADBC statement
+path is certified independently.
+
 ### 18.17 Flight sessions and target selection
 
 Flight SQL `SetSessionOptions`, `GetSessionOptions`, and `CloseSession` map to

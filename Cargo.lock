@@ -2134,6 +2134,7 @@ name = "qcli-driver-api"
 version = "0.1.0"
 dependencies = [
  "arrow-array 59.1.0",
+ "arrow-schema 59.1.0",
  "async-trait",
  "tokio",
 ]

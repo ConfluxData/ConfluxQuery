@@ -111,9 +111,92 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  connectivity-conformance:
+    name: Packaged ADBC and JDBC conformance
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: qcli-x86_64-unknown-linux-gnu
+          path: dist
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: conformance/m19/python/requirements.txt
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.6"
+          cache-dependency-path: conformance/m19/go/go.sum
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: conformance/m19/java/pom.xml
+      - name: Start gateway from release archive
+        shell: bash
+        run: |
+          tar -xzf dist/qcli-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz -C /tmp
+          cp examples/milestone-11-auth.toml /tmp/qcli-m19-auth.toml
+          chmod 600 /tmp/qcli-m19-auth.toml
+          /tmp/qcli-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu/qcli \
+            --config examples/milestone-2.env serve \
+            --bind 127.0.0.1:18089 \
+            --auth-file /tmp/qcli-m19-auth.toml \
+            --flight-bind 127.0.0.1:32010 \
+            >/tmp/qcli-m19-server.log 2>&1 &
+          echo "$!" > /tmp/qcli-m19-server.pid
+          for attempt in {1..60}; do
+            if curl --silent --fail http://127.0.0.1:18089/openapi.json >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/qcli-m19-server.log
+          exit 1
+      - run: pip install -r conformance/m19/python/requirements.txt
+      - name: Python ADBC 1.12
+        run: python conformance/m19/python/profile.py
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: demo
+      - name: Go ADBC 1.12
+        working-directory: conformance/m19/go
+        run: go run .
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: demo
+      - name: Java ADBC 0.24
+        run: mvn -q -f conformance/m19/java/pom.xml compile exec:java -Dexec.mainClass=org.apache.qcli.AdbcProfile
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: demo
+          MAVEN_OPTS: --add-opens=java.base/java.nio=ALL-UNNAMED
+      - name: Arrow Flight SQL JDBC 19
+        run: mvn -q -f conformance/m19/java/pom.xml exec:java -Dexec.mainClass=org.apache.qcli.JdbcProfile
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: demo
+          MAVEN_OPTS: --add-opens=java.base/java.nio=ALL-UNNAMED
+      - name: Rust ADBC C driver manager 0.24
+        run: cargo run --locked --manifest-path conformance/m19/rust/Cargo.toml
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: demo
+      - name: Stop gateway
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f /tmp/qcli-m19-server.pid ]]; then kill "$(cat /tmp/qcli-m19-server.pid)" || true; fi
+          cat /tmp/qcli-m19-server.log || true
+
   publish-github:
     name: Sign and publish GitHub release
-    needs: [validate, build]
+    needs: [validate, build, connectivity-conformance]
     runs-on: ubuntu-latest
     environment: github-release
     permissions:
