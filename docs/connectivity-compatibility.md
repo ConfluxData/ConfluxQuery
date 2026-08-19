@@ -13,6 +13,7 @@ profile. Newer versions are unverified until that pin is deliberately updated.
 | Java ADBC Flight SQL | 0.24.0 | Supported | Live profile | Live profile | Live profile |
 | Rust + ADBC C driver manager | 0.24.0 | Supported | Live profile | Live profile | Live profile |
 | Apache Arrow Flight SQL JDBC | 19.0.0 | Supported | Not yet supported | Not yet supported | Not yet supported |
+| Apache Arrow Flight SQL ODBC | 25.0.0 source | Experimental | Not certified | Not certified | Not certified |
 
 `Supported` means the profile is a required pull-request and packaged-release
 gate. `Live profile` means the same client is exercised by the protected
@@ -27,6 +28,14 @@ non-executing query-description operation. qcli does not execute a query during
 prepare, invent a schema, or rewrite it into a vendor-specific probe. Those
 three JDBC combinations remain unsupported until their adapters implement and
 pass that contract.
+
+ODBC is experimental. Apache Arrow 25 contains a Flight SQL ODBC implementation
+under Apache-2.0 but does not publish supported end-user packages, and the
+current driver does not implement `SQLCancel` or parameter binding. The reusable
+profile and BI evidence procedure are documented in
+[ODBC and BI connectivity](odbc-bi-connectivity.md). No ODBC or BI combination
+is supported until it satisfies M20's platform, cancellation, and application
+exit gates.
 
 The Python package uses the ADBC C driver manager and the Apache Go Flight SQL
 driver. The separate Rust profile dynamically loads the packaged native Flight

@@ -146,6 +146,8 @@ jobs:
         env:
           QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
           QCLI_FLIGHT_TARGET: demo
+      - name: M20 ODBC profile integrity
+        run: python -c 'from pathlib import Path; compile(Path("conformance/m20/python/profile.py").read_text(), "profile.py", "exec")'
       - name: Stop gateway
         if: always()
         shell: bash
