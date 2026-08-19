@@ -8,8 +8,8 @@ use qcli_auth::AuthenticatedPrincipal;
 use qcli_config::{Config, ResolvedTarget};
 use qcli_core::{CoreError, QueryHandle, QueryItem, QueryService, SessionManager, SessionSnapshot};
 use qcli_driver_api::{
-    AdapterCapability, CancellationSignal, EngineAdapter, MetadataRequest, QueryEvent,
-    QueryProgress, QueryState,
+    AdapterCapability, CancellationSignal, EngineAdapter, IngestRequest, IngestSource,
+    MetadataRequest, QueryEvent, QueryProgress, QueryState,
 };
 use qcli_metadata::MetadataService;
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -150,6 +150,8 @@ pub struct ResultPage {
 
 pub struct ResultBatchReader {
     source: ResultBatchReaderSource,
+    skip: usize,
+    remaining: Option<usize>,
 }
 
 enum ResultBatchReaderSource {
@@ -165,12 +167,33 @@ impl ResultBatchReader {
     /// Returns a structured storage error if a spilled Arrow IPC result cannot
     /// be decoded.
     pub fn next_batch(&mut self) -> Result<Option<RecordBatch>, ServiceError> {
-        match &mut self.source {
-            ResultBatchReaderSource::Memory(batches) => Ok(batches.next()),
-            ResultBatchReaderSource::Spill(batches) => {
-                batches.next().transpose().map_err(storage_service_error)
+        while self.skip > 0 {
+            let skipped = match &mut self.source {
+                ResultBatchReaderSource::Memory(batches) => batches.next(),
+                ResultBatchReaderSource::Spill(batches) => {
+                    batches.next().transpose().map_err(storage_service_error)?
+                }
+            };
+            if skipped.is_none() {
+                return Ok(None);
             }
+            self.skip -= 1;
         }
+        if self.remaining == Some(0) {
+            return Ok(None);
+        }
+        let batch = match &mut self.source {
+            ResultBatchReaderSource::Memory(batches) => batches.next(),
+            ResultBatchReaderSource::Spill(batches) => {
+                batches.next().transpose().map_err(storage_service_error)?
+            }
+        };
+        if batch.is_some()
+            && let Some(remaining) = &mut self.remaining
+        {
+            *remaining -= 1;
+        }
+        Ok(batch)
     }
 }
 
@@ -748,6 +771,74 @@ impl GatewayService {
             .map_err(|error| core_error(&error))
     }
 
+    pub async fn ingest(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        session_id: &str,
+        request: IngestRequest,
+        batches: mpsc::Receiver<RecordBatch>,
+        cancellation: CancellationSignal,
+    ) -> Result<i64, ServiceError> {
+        self.ensure_available()?;
+        if request.table.trim().is_empty() || request.table.len() > 1024 {
+            return Err(ServiceError::new(
+                ServiceErrorKind::InvalidArgument,
+                "invalid_ingest_table",
+                "ingestion table must contain between 1 and 1024 bytes",
+            ));
+        }
+        let snapshot = self.session(principal, session_id)?;
+        let capabilities = self
+            .state
+            .metadata
+            .capabilities(&snapshot.engine)
+            .ok_or_else(|| {
+                ServiceError::new(
+                    ServiceErrorKind::InvalidArgument,
+                    "adapter_not_found",
+                    "adapter capabilities are unavailable",
+                )
+            })?;
+        if !capabilities.supports(AdapterCapability::BulkIngest) {
+            return Err(ServiceError::new(
+                ServiceErrorKind::FailedPrecondition,
+                "unsupported_capability",
+                "Arrow bulk ingestion is not supported by this adapter",
+            ));
+        }
+        let target = snapshot.target.clone();
+        self.audit(
+            "ingest.start",
+            "allowed",
+            Some(principal),
+            Some(&target),
+            Some(session_id),
+            None,
+        );
+        let result = self
+            .state
+            .queries
+            .ingest(
+                snapshot,
+                request,
+                IngestSource {
+                    batches,
+                    cancellation,
+                },
+            )
+            .await
+            .map_err(|error| core_error(&error));
+        self.audit(
+            "ingest.finish",
+            if result.is_ok() { "allowed" } else { "failed" },
+            Some(principal),
+            Some(&target),
+            Some(session_id),
+            None,
+        );
+        result
+    }
+
     pub fn close_prepared_statement(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -849,10 +940,71 @@ impl GatewayService {
         })
     }
 
+    pub fn result_batch_count(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        query_id: &str,
+    ) -> Result<usize, ServiceError> {
+        let record = self.owned_record(principal, query_id)?;
+        let data = record.data.lock().expect("query record mutex poisoned");
+        if data.state != "completed" {
+            return Err(ServiceError::new(
+                ServiceErrorKind::FailedPrecondition,
+                "query_running",
+                "query must complete before partition discovery",
+            ));
+        }
+        match &data.storage {
+            ResultStorage::Memory(batches) => Ok(batches.len()),
+            ResultStorage::Spill { path, writer } => {
+                if writer.is_some() {
+                    return Err(ServiceError::new(
+                        ServiceErrorKind::FailedPrecondition,
+                        "query_running",
+                        "query result is still being written",
+                    ));
+                }
+                let file = std::fs::File::open(path).map_err(storage_service_error)?;
+                let reader = FileReader::try_new(file, None).map_err(storage_service_error)?;
+                Ok(reader.count())
+            }
+        }
+    }
+
     pub fn result_reader(
         &self,
         principal: &AuthenticatedPrincipal,
         query_id: &str,
+    ) -> Result<ResultBatchReader, ServiceError> {
+        self.result_reader_range(principal, query_id, 0, None)
+    }
+
+    pub fn result_partition_reader(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        query_id: &str,
+        partition: usize,
+        partitions: usize,
+    ) -> Result<ResultBatchReader, ServiceError> {
+        if partitions == 0 || partition >= partitions {
+            return Err(ServiceError::new(
+                ServiceErrorKind::InvalidArgument,
+                "invalid_result_partition",
+                "result partition is outside the advertised range",
+            ));
+        }
+        let batches = self.result_batch_count(principal, query_id)?;
+        let start = batches.saturating_mul(partition) / partitions;
+        let end = batches.saturating_mul(partition + 1) / partitions;
+        self.result_reader_range(principal, query_id, start, Some(end - start))
+    }
+
+    fn result_reader_range(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        query_id: &str,
+        skip: usize,
+        remaining: Option<usize>,
     ) -> Result<ResultBatchReader, ServiceError> {
         let record = self.owned_record(principal, query_id)?;
         let data = record.data.lock().expect("query record mutex poisoned");
@@ -890,7 +1042,11 @@ impl GatewayService {
                 ));
             }
         };
-        Ok(ResultBatchReader { source })
+        Ok(ResultBatchReader {
+            source,
+            skip,
+            remaining,
+        })
     }
 
     pub fn query_schema(

@@ -15,8 +15,9 @@ use arrow_flight::sql::{
     CommandGetCrossReference, CommandGetDbSchemas, CommandGetExportedKeys, CommandGetImportedKeys,
     CommandGetPrimaryKeys, CommandGetSqlInfo, CommandGetTableTypes, CommandGetTables,
     CommandGetXdbcTypeInfo, CommandPreparedStatementQuery, CommandPreparedStatementUpdate,
-    CommandStatementQuery, CommandStatementUpdate, DoPutPreparedStatementResult, Nullable,
-    ProstMessageExt, Searchable, SqlInfo, SqlSupportedCaseSensitivity, SqlSupportedTransaction,
+    CommandStatementIngest, CommandStatementQuery, CommandStatementUpdate,
+    DoPutPreparedStatementResult, Nullable, ProstMessageExt, Searchable, SqlInfo,
+    SqlSupportedCaseSensitivity, SqlSupportedTransaction, TableExistsOption, TableNotExistOption,
     TicketStatementQuery, XdbcDataType,
 };
 use arrow_flight::{
@@ -32,8 +33,8 @@ use hmac::{Hmac, Mac};
 use prost::Message;
 use qcli_auth::{AuthenticatedPrincipal, AuthenticationErrorKind, Authenticator};
 use qcli_driver_api::{
-    AdapterCapability, ColumnMetadata, IdentifierCapabilities, IdentifierCase, MetadataRequest,
-    ObjectKind,
+    AdapterCapability, CancellationSignal, ColumnMetadata, IdentifierCapabilities, IdentifierCase,
+    IngestRequest, IngestTableExists, MetadataRequest, ObjectKind,
 };
 use qcli_service::{GatewayService, ResultBatchReader, ServiceError, ServiceErrorKind};
 use serde::{Deserialize, Serialize};
@@ -47,6 +48,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tonic::metadata::MetadataValue;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::server::TcpIncoming;
@@ -278,7 +280,11 @@ impl QcliFlightSql {
     ) -> Self {
         Self {
             gateway,
-            sql_info: Arc::new(sql_info_data(true, &IdentifierCapabilities::default())),
+            sql_info: Arc::new(sql_info_data(
+                true,
+                false,
+                &IdentifierCapabilities::default(),
+            )),
             xdbc_info: Arc::new(xdbc_type_info()),
             tickets: Arc::new(TicketSigner::new()),
             sessions: Arc::new(SessionSigner::new()),
@@ -535,6 +541,10 @@ impl QcliFlightSql {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the Flight SQL trait keeps protocol dispatch methods in one generated async implementation"
+)]
 #[tonic::async_trait]
 impl FlightSqlService for QcliFlightSql {
     type FlightService = Self;
@@ -584,6 +594,19 @@ impl FlightSqlService for QcliFlightSql {
     ) -> Result<Response<FlightInfo>, Status> {
         let principal = required_principal(&request)?.clone();
         let descriptor = request.get_ref().clone();
+        let requested_partitions = request
+            .metadata()
+            .get("qcli-result-partitions")
+            .and_then(|value| value.to_str().ok())
+            .map(str::parse::<usize>)
+            .transpose()
+            .map_err(|_| Status::invalid_argument("qcli-result-partitions must be an integer"))?
+            .unwrap_or(1);
+        if !(1..=16).contains(&requested_partitions) {
+            return Err(Status::invalid_argument(
+                "qcli-result-partitions must be between 1 and 16",
+            ));
+        }
         let session = self.session_from_request(&request, &principal)?;
         let status = if let Some(session) = &session {
             self.gateway
@@ -604,30 +627,49 @@ impl FlightSqlService for QcliFlightSql {
                 .submit_stateless_query(&principal, target, BTreeMap::new(), query.query)
                 .map_err(service_error_status)?
         };
-        let status = wait_for_schema(&self.gateway, &principal, &status.id).await?;
+        let mut status = wait_for_schema(&self.gateway, &principal, &status.id).await?;
         let schema = self
             .gateway
             .query_schema(&principal, &status.id)
             .map_err(service_error_status)?;
-        let signed = self
-            .tickets
-            .issue(&principal.id, &status.id, self.ticket_ttl)?;
-        let ticket = TicketStatementQuery {
-            statement_handle: signed.into(),
+        let partitions = if requested_partitions > 1 {
+            status = wait_for_terminal(&self.gateway, &principal, &status.id).await?;
+            let batches = self
+                .gateway
+                .result_batch_count(&principal, &status.id)
+                .map_err(service_error_status)?;
+            requested_partitions.min(batches.max(1))
+        } else {
+            1
         };
-        let endpoint =
-            FlightEndpoint::new().with_ticket(Ticket::new(ticket.as_any().encode_to_vec()));
+        let mut endpoints = Vec::with_capacity(partitions);
+        for partition in 0..partitions {
+            let signed = self.tickets.issue_partition(
+                &principal.id,
+                &status.id,
+                partition,
+                partitions,
+                self.ticket_ttl,
+            )?;
+            let ticket = TicketStatementQuery {
+                statement_handle: signed.into(),
+            };
+            endpoints.push(
+                FlightEndpoint::new().with_ticket(Ticket::new(ticket.as_any().encode_to_vec())),
+            );
+        }
         let metadata = serde_json::to_vec(&serde_json::json!({
             "qcli_query_id": status.id,
             "engine_query_id": status.engine_query_id,
             "target": status.target,
+            "result_partitions": partitions,
         }))
         .map_err(|error| Status::internal(error.to_string()))?;
         let info = FlightInfo::new()
             .try_with_schema(schema.as_ref())
             .map_err(|error| Status::internal(error.to_string()))?
             .with_descriptor(descriptor)
-            .with_endpoint(endpoint)
+            .with_endpoints(endpoints)
             .with_total_records(if status.state == "completed" {
                 i64::try_from(status.rows).unwrap_or(i64::MAX)
             } else {
@@ -638,7 +680,7 @@ impl FlightSqlService for QcliFlightSql {
             } else {
                 -1
             })
-            .with_ordered(true)
+            .with_ordered(partitions == 1)
             .with_app_metadata(metadata);
         let mut response = Response::new(info);
         if let Some(session) = session {
@@ -770,6 +812,7 @@ impl FlightSqlService for QcliFlightSql {
             .unwrap_or_default();
         let sql_info = sql_info_data(
             capabilities.supports(AdapterCapability::CancelQuery),
+            capabilities.supports(AdapterCapability::BulkIngest),
             &identifiers,
         );
         let builder = query.into_builder(&sql_info);
@@ -987,10 +1030,20 @@ impl FlightSqlService for QcliFlightSql {
             .gateway
             .query_schema(&principal, &payload.query_id)
             .map_err(service_error_status)?;
-        let reader = self
-            .gateway
-            .result_reader(&principal, &payload.query_id)
-            .map_err(service_error_status)?;
+        let reader = if payload.partitions == 1 {
+            self.gateway
+                .result_reader(&principal, &payload.query_id)
+                .map_err(service_error_status)?
+        } else {
+            self.gateway
+                .result_partition_reader(
+                    &principal,
+                    &payload.query_id,
+                    payload.partition,
+                    payload.partitions,
+                )
+                .map_err(service_error_status)?
+        };
         let batches = stream::try_unfold(reader, next_result_batch);
         let encoded = FlightDataEncoderBuilder::new()
             .with_schema(schema)
@@ -1078,6 +1131,167 @@ impl FlightSqlService for QcliFlightSql {
             .execute_session_update(&principal, &session.session_id, query.query)
             .await
             .map_err(service_error_status)
+    }
+
+    async fn do_put_statement_ingest(
+        &self,
+        query: CommandStatementIngest,
+        request: Request<PeekableFlightDataStream>,
+    ) -> Result<i64, Status> {
+        if query.transaction_id.is_some() {
+            return Err(Status::unimplemented(
+                "transactional ingestion is not supported",
+            ));
+        }
+        let definition = query.table_definition_options.ok_or_else(|| {
+            Status::invalid_argument("ingestion table definition options are required")
+        })?;
+        let create_if_missing = match TableNotExistOption::try_from(definition.if_not_exist)
+            .map_err(|_| Status::invalid_argument("invalid table-not-exist option"))?
+        {
+            TableNotExistOption::Create => true,
+            TableNotExistOption::Fail => false,
+            TableNotExistOption::Unspecified => {
+                return Err(Status::invalid_argument(
+                    "table-not-exist option must be CREATE or FAIL",
+                ));
+            }
+        };
+        let if_exists = match TableExistsOption::try_from(definition.if_exists)
+            .map_err(|_| Status::invalid_argument("invalid table-exists option"))?
+        {
+            TableExistsOption::Fail => IngestTableExists::Fail,
+            TableExistsOption::Append => IngestTableExists::Append,
+            TableExistsOption::Replace => IngestTableExists::Replace,
+            TableExistsOption::Unspecified => {
+                return Err(Status::invalid_argument(
+                    "table-exists option must be FAIL, APPEND, or REPLACE",
+                ));
+            }
+        };
+
+        let principal = required_principal(&request)?.clone();
+        let contextual = self.session_from_request(&request, &principal)?;
+        if query.temporary && contextual.is_none() {
+            return Err(Status::failed_precondition(
+                "temporary ingestion requires a Flight session",
+            ));
+        }
+        let (session_id, owns_session) = if let Some(session) = contextual {
+            (session.session_id, false)
+        } else {
+            let target = request
+                .metadata()
+                .get("qcli-target")
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    Status::invalid_argument(
+                        "qcli-target metadata or a Flight session cookie is required",
+                    )
+                })?;
+            let session = self
+                .gateway
+                .create_session(&principal, target, BTreeMap::new())
+                .map_err(service_error_status)?;
+            (session.id, true)
+        };
+
+        let ingest = IngestRequest {
+            session_id: String::new(),
+            session_version: 0,
+            target: String::new(),
+            engine: String::new(),
+            properties: BTreeMap::new(),
+            catalog: query.catalog,
+            schema: query.schema,
+            table: query.table,
+            create_if_missing,
+            if_exists,
+            temporary: query.temporary,
+            options: query.options.into_iter().collect(),
+        };
+        let cancellation = CancellationSignal::default();
+        let (batch_tx, batch_rx) = mpsc::channel(2);
+        let gateway = self.gateway.clone();
+        let ingest_principal = principal.clone();
+        let ingest_session_id = session_id.clone();
+        let ingest_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move {
+            gateway
+                .ingest(
+                    &ingest_principal,
+                    &ingest_session_id,
+                    ingest,
+                    batch_rx,
+                    ingest_cancellation,
+                )
+                .await
+        });
+
+        let mut batches = FlightRecordBatchStream::new_from_flight_data(
+            request
+                .into_inner()
+                .map_err(|status| FlightError::Tonic(Box::new(status))),
+        );
+        let mut rows = 0_usize;
+        let mut bytes = 0_usize;
+        let mut schema = None;
+        loop {
+            let batch = match batches.try_next().await {
+                Ok(Some(batch)) => batch,
+                Ok(None) => break,
+                Err(error) => {
+                    cancellation.cancel();
+                    drop(batch_tx);
+                    task.await.ok();
+                    if owns_session {
+                        self.gateway.close_session(&principal, &session_id).ok();
+                    }
+                    return Err(Status::from(error));
+                }
+            };
+            if schema
+                .as_ref()
+                .is_some_and(|expected| expected != &batch.schema())
+            {
+                cancellation.cancel();
+                drop(batch_tx);
+                task.await.ok();
+                if owns_session {
+                    self.gateway.close_session(&principal, &session_id).ok();
+                }
+                return Err(Status::invalid_argument(
+                    "all ingestion batches must have the same Arrow schema",
+                ));
+            }
+            schema.get_or_insert_with(|| batch.schema());
+            rows = rows.saturating_add(batch.num_rows());
+            bytes = bytes.saturating_add(batch.get_array_memory_size());
+            if rows > 1_000_000 || bytes > 64 * 1024 * 1024 {
+                cancellation.cancel();
+                drop(batch_tx);
+                task.await.ok();
+                if owns_session {
+                    self.gateway.close_session(&principal, &session_id).ok();
+                }
+                return Err(Status::resource_exhausted(
+                    "ingestion exceeds the 1,000,000-row or 64-MiB request limit",
+                ));
+            }
+            if batch_tx.send(batch).await.is_err() {
+                break;
+            }
+        }
+        drop(batch_tx);
+        let result = task
+            .await
+            .map_err(|error| Status::internal(format!("ingestion task failed: {error}")))?
+            .map_err(service_error_status);
+        if owns_session {
+            self.gateway.close_session(&principal, &session_id).ok();
+        }
+        result
     }
 
     async fn do_action_create_prepared_statement(
@@ -1680,7 +1894,11 @@ fn xdbc_type_info() -> XdbcTypeInfoData {
     builder.build().expect("static XDBC type metadata is valid")
 }
 
-fn sql_info_data(cancel: bool, identifiers: &IdentifierCapabilities) -> SqlInfoData {
+fn sql_info_data(
+    cancel: bool,
+    bulk_ingestion: bool,
+    identifiers: &IdentifierCapabilities,
+) -> SqlInfoData {
     let mut builder = SqlInfoDataBuilder::new();
     builder.append(SqlInfo::FlightSqlServerName, "qcli");
     builder.append(SqlInfo::FlightSqlServerVersion, env!("CARGO_PKG_VERSION"));
@@ -1693,7 +1911,7 @@ fn sql_info_data(cancel: bool, identifiers: &IdentifierCapabilities) -> SqlInfoD
         SqlSupportedTransaction::None as i32,
     );
     builder.append(SqlInfo::FlightSqlServerCancel, cancel);
-    builder.append(SqlInfo::FlightSqlServerBulkIngestion, false);
+    builder.append(SqlInfo::FlightSqlServerBulkIngestion, bulk_ingestion);
     builder.append(
         SqlInfo::SqlIdentifierCase,
         sql_identifier_case(identifiers.unquoted) as i32,
@@ -1764,6 +1982,8 @@ struct TicketPayload {
     query_id: String,
     owner: String,
     expires_at: u64,
+    partition: usize,
+    partitions: usize,
 }
 
 struct TicketSigner {
@@ -1836,11 +2056,24 @@ impl TicketSigner {
     }
 
     fn issue(&self, owner: &str, query_id: &str, ttl: Duration) -> Result<Vec<u8>, Status> {
+        self.issue_partition(owner, query_id, 0, 1, ttl)
+    }
+
+    fn issue_partition(
+        &self,
+        owner: &str,
+        query_id: &str,
+        partition: usize,
+        partitions: usize,
+        ttl: Duration,
+    ) -> Result<Vec<u8>, Status> {
         let payload = TicketPayload {
             version: 1,
             query_id: query_id.into(),
             owner: owner.into(),
             expires_at: now_unix().saturating_add(ttl.as_secs()),
+            partition,
+            partitions,
         };
         let payload =
             serde_json::to_vec(&payload).map_err(|error| Status::internal(error.to_string()))?;
@@ -1883,6 +2116,11 @@ impl TicketSigner {
         if payload.owner != owner {
             return Err(Status::permission_denied(
                 "query ticket belongs to another principal",
+            ));
+        }
+        if payload.partitions == 0 || payload.partition >= payload.partitions {
+            return Err(Status::invalid_argument(
+                "query ticket has an invalid result partition",
             ));
         }
         if payload.expires_at < now_unix() {
@@ -2033,12 +2271,14 @@ fn decode_statement_ticket(bytes: &[u8]) -> Result<TicketStatementQuery, Status>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::{Int64Array, StringArray};
+    use arrow_flight::sql::TableDefinitionOptions;
     use arrow_flight::sql::client::FlightSqlServiceClient;
     use qcli_auth::AuthenticationError;
     use qcli_config::Config;
     use qcli_driver_api::EngineAdapter;
     use qcli_driver_demo::DemoAdapter;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap};
     use std::sync::atomic::{AtomicU64, Ordering};
     use tonic::Code;
     use tonic::transport::{Channel, Endpoint};
@@ -2125,6 +2365,7 @@ mod tests {
                 SqlInfo::FlightSqlServerName,
                 SqlInfo::FlightSqlServerSql,
                 SqlInfo::FlightSqlServerTransaction,
+                SqlInfo::FlightSqlServerBulkIngestion,
             ])
             .await
             .unwrap();
@@ -2137,7 +2378,7 @@ mod tests {
         while let Some(batch) = results.try_next().await.unwrap() {
             rows += batch.num_rows();
         }
-        assert_eq!(rows, 3);
+        assert_eq!(rows, 4);
         shutdown.send(()).unwrap();
         task.await.unwrap().unwrap();
     }
@@ -2188,6 +2429,155 @@ mod tests {
             }
             assert_eq!(i64::try_from(rows).unwrap(), info.total_records);
         }
+        shutdown.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_ingestion_creates_appends_replaces_and_queries_back() {
+        let (mut client, shutdown, task) = server(FlightServerConfig::default()).await;
+        client.set_token("valid-key".into());
+        client.set_header("qcli-target", "demo");
+        let table = format!("ingest_{}", NEXT_CONFIG.fetch_add(1, Ordering::Relaxed));
+        let batch = RecordBatch::try_from_iter(vec![
+            ("id", Arc::new(Int64Array::from(vec![1, 2])) as _),
+            ("name", Arc::new(StringArray::from(vec!["one", "two"])) as _),
+        ])
+        .unwrap();
+
+        let command = |if_exists: TableExistsOption| CommandStatementIngest {
+            table_definition_options: Some(TableDefinitionOptions {
+                if_not_exist: TableNotExistOption::Create.into(),
+                if_exists: if_exists.into(),
+            }),
+            table: table.clone(),
+            schema: None,
+            catalog: None,
+            temporary: false,
+            transaction_id: None,
+            options: HashMap::new(),
+        };
+        let count = client
+            .execute_ingest(
+                command(TableExistsOption::Fail),
+                stream::iter(vec![Ok::<_, FlightError>(batch.clone())]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let count = client
+            .execute_ingest(
+                command(TableExistsOption::Append),
+                stream::iter(vec![Ok::<_, FlightError>(batch.clone())]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+        let info = client
+            .execute(format!("select * from {table}"), None)
+            .await
+            .unwrap();
+        let mut results = client
+            .do_get(info.endpoint[0].ticket.clone().unwrap())
+            .await
+            .unwrap();
+        let mut rows = 0;
+        while let Some(batch) = results.try_next().await.unwrap() {
+            rows += batch.num_rows();
+        }
+        assert_eq!(rows, 4);
+
+        let count = client
+            .execute_ingest(
+                command(TableExistsOption::Replace),
+                stream::iter(vec![Ok::<_, FlightError>(batch.slice(0, 1))]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let info = client
+            .execute(format!("select * from {table}"), None)
+            .await
+            .unwrap();
+        let mut results = client
+            .do_get(info.endpoint[0].ticket.clone().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(results.try_next().await.unwrap().unwrap().num_rows(), 1);
+        assert!(results.try_next().await.unwrap().is_none());
+
+        shutdown.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn opt_in_large_read_uses_independent_signed_endpoints() {
+        let (mut client, shutdown, task) = server(FlightServerConfig::default()).await;
+        client.set_token("valid-key".into());
+        client.set_header("qcli-target", "demo");
+        client.set_header("qcli-result-partitions", "3");
+        let info = client.execute("generate 3072".into(), None).await.unwrap();
+        assert_eq!(info.endpoint.len(), 3);
+        assert!(!info.ordered);
+
+        let mut rows = 0;
+        for endpoint in info.endpoint {
+            let mut results = client.do_get(endpoint.ticket.unwrap()).await.unwrap();
+            while let Some(batch) = results.try_next().await.unwrap() {
+                rows += batch.num_rows();
+            }
+        }
+        assert_eq!(rows, 3072);
+
+        shutdown.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_ingestion_is_atomic_and_same_request_can_be_retried() {
+        let (mut client, shutdown, task) = server(FlightServerConfig::default()).await;
+        client.set_token("valid-key".into());
+        client.set_header("qcli-target", "demo");
+        let table = format!("retry_{}", NEXT_CONFIG.fetch_add(1, Ordering::Relaxed));
+        let ids =
+            RecordBatch::try_from_iter(vec![("id", Arc::new(Int64Array::from(vec![1, 2])) as _)])
+                .unwrap();
+        let oversized = RecordBatch::try_from_iter(vec![(
+            "id",
+            Arc::new(Int64Array::from_iter_values(0..1_000_001)) as _,
+        )])
+        .unwrap();
+        let command = || CommandStatementIngest {
+            table_definition_options: Some(TableDefinitionOptions {
+                if_not_exist: TableNotExistOption::Create.into(),
+                if_exists: TableExistsOption::Fail.into(),
+            }),
+            table: table.clone(),
+            schema: None,
+            catalog: None,
+            temporary: false,
+            transaction_id: None,
+            options: HashMap::new(),
+        };
+
+        let error = client
+            .execute_ingest(
+                command(),
+                stream::iter(vec![Ok::<_, FlightError>(oversized)]),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            FlightError::Tonic(ref status) if status.code() == Code::ResourceExhausted
+        ));
+        let count = client
+            .execute_ingest(command(), stream::iter(vec![Ok::<_, FlightError>(ids)]))
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
         shutdown.send(()).unwrap();
         task.await.unwrap().unwrap();
     }

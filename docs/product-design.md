@@ -1351,6 +1351,17 @@ Arrow `DoPut` ingestion is capability-driven. Create, append, replace, batch
 parameter, partial-failure, retry, and update-count semantics must be explicit
 for each adapter.
 
+The shared ingestion contract now streams Arrow batches through a bounded
+channel with schema, row, and byte validation. The demo adapter implements
+atomic create, append, replace, retry, and query-back behavior. Trino,
+Databricks SQL, and Snowflake remain capability-rejected until native write
+paths pass that contract. Transactional and temporary behavior is not emulated.
+
+Large retained reads may opt into multiple independently signed Flight
+endpoints. Single-endpoint early streaming remains the default; partitioned
+delivery waits for completion and is explicitly unordered. The detailed public
+contract is in [Ingestion and advanced transfer](ingestion-and-advanced-transfer.md).
+
 ### 18.21 Flight SQL security and operations
 
 Flight SQL uses the same `Authenticator`, `AuthenticatedPrincipal`, target ACLs,

@@ -383,7 +383,7 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 | M18 — Prepared statements and updates | Complete | Bind typed parameters and execute queries/updates safely |
 | M19 — ADBC and JDBC compatibility | Complete | Pass supported ADBC and JDBC client profiles |
 | M20 — ODBC and BI compatibility | In progress | Connect approved ODBC and representative BI clients |
-| M21 — Ingestion and advanced transfer | Pending | Upload Arrow batches and use scalable multi-endpoint results |
+| M21 — Ingestion and advanced transfer | Complete | Upload Arrow batches and use scalable multi-endpoint results |
 | M22 — Enterprise identity and transport | Pending | Operate Flight SQL with OIDC, mTLS, rotation, and hardened gRPC |
 | M23 — High availability | Pending | Share sessions/results and survive node failure |
 | M24 — Unified connectivity release | Pending | Publish supported HTTP, Flight SQL, ADBC, JDBC, and ODBC workflows |

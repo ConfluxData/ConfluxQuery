@@ -71,6 +71,34 @@ pub struct QuerySink {
     pub cancellation: CancellationSignal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestTableExists {
+    Fail,
+    Append,
+    Replace,
+}
+
+#[derive(Debug, Clone)]
+pub struct IngestRequest {
+    pub session_id: String,
+    pub session_version: u64,
+    pub target: String,
+    pub engine: String,
+    pub properties: BTreeMap<String, String>,
+    pub catalog: Option<String>,
+    pub schema: Option<String>,
+    pub table: String,
+    pub create_if_missing: bool,
+    pub if_exists: IngestTableExists,
+    pub temporary: bool,
+    pub options: BTreeMap<String, String>,
+}
+
+pub struct IngestSource {
+    pub batches: mpsc::Receiver<RecordBatch>,
+    pub cancellation: CancellationSignal,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriverError {
     pub code: String,
@@ -106,10 +134,11 @@ pub enum AdapterCapability {
     PreparedStatements,
     TypedParameters,
     StatementUpdates,
+    BulkIngest,
 }
 
 impl AdapterCapability {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::StreamResults,
         Self::CancelQuery,
         Self::ListCatalogs,
@@ -119,6 +148,7 @@ impl AdapterCapability {
         Self::PreparedStatements,
         Self::TypedParameters,
         Self::StatementUpdates,
+        Self::BulkIngest,
     ];
 
     #[must_use]
@@ -133,6 +163,7 @@ impl AdapterCapability {
             Self::PreparedStatements => "prepared_statements",
             Self::TypedParameters => "typed_parameters",
             Self::StatementUpdates => "statement_updates",
+            Self::BulkIngest => "bulk_ingest",
         }
     }
 }
@@ -283,6 +314,16 @@ pub trait EngineAdapter: Send + Sync {
                 "native typed prepared updates are not supported by this adapter",
             ))
         }
+    }
+    async fn ingest(
+        &self,
+        _request: IngestRequest,
+        _source: IngestSource,
+    ) -> Result<i64, DriverError> {
+        Err(DriverError::new(
+            "unsupported_capability",
+            "Arrow bulk ingestion is not supported by this adapter",
+        ))
     }
     async fn list_catalogs(
         &self,

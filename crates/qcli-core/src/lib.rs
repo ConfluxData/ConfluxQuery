@@ -4,8 +4,8 @@ use arrow_array::RecordBatch;
 use chrono::Local;
 use qcli_config::ResolvedTarget;
 use qcli_driver_api::{
-    CancellationSignal, DriverError, EngineAdapter, PreparedStatementMetadata, QueryEvent,
-    QueryRequest, QuerySink, QueryState,
+    CancellationSignal, DriverError, EngineAdapter, IngestRequest, IngestSource,
+    PreparedStatementMetadata, QueryEvent, QueryRequest, QuerySink, QueryState,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -592,6 +592,34 @@ impl QueryService {
                 },
                 parameters,
             )
+            .await
+            .map_err(CoreError::Driver)
+    }
+
+    /// Stream Arrow batches into the adapter selected by the session snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter lookup, unsupported-capability, cancellation, or
+    /// native ingestion error.
+    pub async fn ingest(
+        &self,
+        snapshot: SessionSnapshot,
+        mut request: IngestRequest,
+        source: IngestSource,
+    ) -> Result<i64, CoreError> {
+        let adapter = self
+            .adapters
+            .get(&snapshot.engine)
+            .cloned()
+            .ok_or_else(|| CoreError::AdapterNotFound(snapshot.engine.clone()))?;
+        request.session_id = snapshot.id;
+        request.session_version = snapshot.version;
+        request.target = snapshot.target;
+        request.engine = snapshot.engine;
+        request.properties = snapshot.properties;
+        adapter
+            .ingest(request, source)
             .await
             .map_err(CoreError::Driver)
     }

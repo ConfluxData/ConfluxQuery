@@ -5,11 +5,12 @@ use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
 use qcli_driver_api::{
     AdapterCapabilities, AdapterCapability, CatalogMetadata, ColumnMetadata, DriverError,
-    EngineAdapter, MetadataRequest, ObjectKind, ObjectMetadata, PreparedStatementMetadata,
-    QueryEvent, QueryRequest, QuerySink, QueryState, SchemaMetadata,
+    EngineAdapter, IngestRequest, IngestSource, IngestTableExists, MetadataRequest, ObjectKind,
+    ObjectMetadata, PreparedStatementMetadata, QueryEvent, QueryRequest, QuerySink, QueryState,
+    SchemaMetadata,
 };
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug, Default)]
 pub struct DemoAdapter;
@@ -31,6 +32,7 @@ impl EngineAdapter for DemoAdapter {
             AdapterCapability::PreparedStatements,
             AdapterCapability::TypedParameters,
             AdapterCapability::StatementUpdates,
+            AdapterCapability::BulkIngest,
         ])
     }
 
@@ -77,8 +79,23 @@ impl EngineAdapter for DemoAdapter {
             .await
             .ok();
         let generated_rows = parse_generate(statement)?;
+        let ingested = selected_table(statement).and_then(|table| {
+            ingested_tables()
+                .lock()
+                .expect("demo ingestion mutex poisoned")
+                .get(&table)
+                .cloned()
+        });
         let mut rows = 0;
-        if let Some(total) = generated_rows {
+        if let Some(ingested) = ingested {
+            for batch in ingested {
+                rows += batch.num_rows();
+                sink.batches
+                    .send(batch)
+                    .await
+                    .map_err(|_| DriverError::new("consumer_closed", "result consumer closed"))?;
+            }
+        } else if let Some(total) = generated_rows {
             while rows < total {
                 if sink.cancellation.is_cancelled() {
                     return Err(DriverError::new("cancelled", "query was cancelled"));
@@ -196,6 +213,78 @@ impl EngineAdapter for DemoAdapter {
                 .max(1),
         )
         .unwrap_or(i64::MAX))
+    }
+
+    async fn ingest(
+        &self,
+        request: IngestRequest,
+        mut source: IngestSource,
+    ) -> Result<i64, DriverError> {
+        if request.temporary {
+            return Err(DriverError::new(
+                "unsupported_ingest_mode",
+                "the demo adapter does not support temporary ingestion",
+            ));
+        }
+        let key = request.table.to_ascii_lowercase();
+        let mut incoming = Vec::new();
+        let mut schema = None;
+        let mut row_count = 0_i64;
+        while let Some(batch) = source.batches.recv().await {
+            if source.cancellation.is_cancelled() {
+                return Err(DriverError::new("cancelled", "ingestion was cancelled"));
+            }
+            if schema
+                .as_ref()
+                .is_some_and(|expected| expected != &batch.schema())
+            {
+                return Err(DriverError::new(
+                    "ingest_schema_mismatch",
+                    "all ingestion batches must have the same Arrow schema",
+                ));
+            }
+            schema.get_or_insert_with(|| batch.schema());
+            row_count =
+                row_count.saturating_add(i64::try_from(batch.num_rows()).unwrap_or(i64::MAX));
+            incoming.push(batch);
+        }
+        if source.cancellation.is_cancelled() {
+            return Err(DriverError::new("cancelled", "ingestion was cancelled"));
+        }
+
+        let mut tables = ingested_tables()
+            .lock()
+            .expect("demo ingestion mutex poisoned");
+        match tables.get_mut(&key) {
+            None if request.create_if_missing => {
+                tables.insert(key, incoming);
+            }
+            None => {
+                return Err(DriverError::new(
+                    "ingest_table_not_found",
+                    "ingestion target does not exist",
+                ));
+            }
+            Some(_) if request.if_exists == IngestTableExists::Fail => {
+                return Err(DriverError::new(
+                    "ingest_table_exists",
+                    "ingestion target already exists",
+                ));
+            }
+            Some(existing) if request.if_exists == IngestTableExists::Append => {
+                if let (Some(existing), Some(incoming)) = (existing.first(), incoming.first())
+                    && existing.schema() != incoming.schema()
+                {
+                    return Err(DriverError::new(
+                        "ingest_schema_mismatch",
+                        "append schema does not match the ingestion target",
+                    ));
+                }
+                existing.extend(incoming);
+            }
+            Some(existing) => *existing = incoming,
+        }
+        Ok(row_count)
     }
 
     async fn list_catalogs(
@@ -374,6 +463,23 @@ fn sample_batch() -> Result<RecordBatch, DriverError> {
     ];
     RecordBatch::try_new(schema, columns)
         .map_err(|error| DriverError::new("arrow", error.to_string()))
+}
+
+fn ingested_tables() -> &'static Mutex<HashMap<String, Vec<RecordBatch>>> {
+    static TABLES: OnceLock<Mutex<HashMap<String, Vec<RecordBatch>>>> = OnceLock::new();
+    TABLES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn selected_table(statement: &str) -> Option<String> {
+    let words = statement
+        .trim_end_matches(';')
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>();
+    (words.len() == 4
+        && words[0].eq_ignore_ascii_case("select")
+        && words[1] == "*"
+        && words[2].eq_ignore_ascii_case("from"))
+    .then(|| words[3].to_ascii_lowercase())
 }
 
 #[cfg(test)]
