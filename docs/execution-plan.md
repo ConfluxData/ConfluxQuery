@@ -387,6 +387,7 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 | M22 — Enterprise identity and transport | Pending | Operate Flight SQL with OIDC, mTLS, rotation, and hardened gRPC |
 | M23 — High availability | Pending | Share sessions/results and survive node failure |
 | M24 — Unified connectivity release | Pending | Publish supported HTTP, Flight SQL, ADBC, JDBC, and ODBC workflows |
+| M25 — qcli JDBC driver | Pending | Publish a branded Type 4 JDBC driver with certified cross-engine behavior |
 
 Allowed status values are `Pending`, `In progress`, `Blocked`, and `Complete`. A milestone becomes `Complete` only after its automated tests, live or deterministic demo, documentation, and milestone report are present.
 
@@ -1017,6 +1018,60 @@ Exit gate:
 - `docs/milestones/milestone-24-notes.md` records the unified connectivity
   release evidence and accepted limitations.
 
+### M25 — qcli JDBC driver
+
+Demo:
+
+```java
+Properties properties = new Properties();
+properties.setProperty("token", System.getenv("QCLI_TOKEN"));
+properties.setProperty("catalog", "hive");
+properties.setProperty("schema", "sales");
+
+try (Connection connection = DriverManager.getConnection(
+        "jdbc:qcli://gateway.example.com:32010/trino-prod", properties);
+     PreparedStatement statement = connection.prepareStatement(
+        "select * from orders where orderkey = ?")) {
+    statement.setLong(1, 42);
+    try (ResultSet results = statement.executeQuery()) {
+        // Consume the result through standard JDBC APIs.
+    }
+}
+```
+
+Must demonstrate:
+
+- A separately versioned Java Type 4 driver distributed as a signed,
+  self-contained JAR and Maven artifact.
+- A stable `jdbc:qcli://` URL, service-provider registration, target selection,
+  TLS/mTLS, token/JWT/OIDC properties, and secure secret redaction.
+- Delegation to the Apache Arrow Flight SQL JDBC implementation for standard
+  transport and Arrow-to-JDBC behavior, with qcli-specific URL, session,
+  diagnostics, and capability handling kept in a thin compatibility layer.
+- Correct `Connection`, `Statement`, `PreparedStatement`, `ResultSet`, and
+  `DatabaseMetaData` behavior for the supported surface.
+- Safe prepare-time result and parameter metadata for Trino, Databricks, and
+  Snowflake without executing a query or fabricating schemas.
+- Accurate types, nulls, decimals, timestamps, updates, cancellation, timeout,
+  resource cleanup, catalog/schema changes, and unsupported-feature errors.
+- Clean-machine profiles for supported JDKs, connection pools, representative
+  Java frameworks, database tools, and every certified qcli engine/version.
+- A published compatibility matrix that distinguishes implemented JDBC API,
+  tested compatibility, engine limitations, and unsupported methods; no broad
+  compliance claim based only on implementing `java.sql.Driver`.
+
+Exit gate:
+
+- The same statement, prepared-statement, metadata, cancellation, timeout, and
+  resource-lifecycle suite passes against certified Trino, Databricks, and
+  Snowflake targets.
+- Unsupported JDBC operations return the correct JDBC exception or capability
+  response and never silently succeed with incorrect behavior.
+- Maven and standalone JAR artifacts pass signing, SBOM, license, dependency,
+  vulnerability, reproducibility, and clean-JDK installation checks.
+- `docs/milestones/milestone-25-notes.md` records driver/server compatibility,
+  conformance evidence, supported tools, and accepted limitations.
+
 ### Milestone completion artifacts
 
 Every milestone produces:
@@ -1597,6 +1652,32 @@ Gate:
 
 Deliverable: unified qcli connectivity release.
 
+### Work package 24: Branded qcli JDBC driver
+
+Purpose: provide a supported qcli-native JDBC product surface without
+duplicating the Flight SQL data plane or warehouse execution logic in Java.
+
+Tasks:
+
+- Create the Java driver modules, `java.sql.Driver` registration, stable
+  `jdbc:qcli://` URL, property model, and self-contained distribution.
+- Wrap and delegate to Apache Arrow Flight SQL JDBC while isolating its public
+  API and version behind qcli-owned compatibility contracts.
+- Map qcli target, identity, TLS, session, catalog, schema, routing, query-tag,
+  and diagnostics properties to standard Flight SQL operations and headers.
+- Complete safe prepare metadata in all certified warehouse adapters.
+- Test JDBC types, metadata, prepared parameters, updates, cancellation,
+  timeouts, concurrency, pooling, cleanup, and unsupported operations.
+- Publish Maven and standalone artifacts with a versioned driver/server/engine
+  compatibility matrix and upgrade policy.
+
+Gate:
+
+- Supported-JDK clean-client suites pass for every certified engine and the
+  packaged artifacts satisfy release security and supply-chain gates.
+
+Deliverable: signed `qcli-jdbc` Maven artifact and standalone driver JAR.
+
 ## 7. Workstream ownership
 
 These workstreams can proceed concurrently only after their dependencies stabilize:
@@ -1620,6 +1701,7 @@ These workstreams can proceed concurrently only after their dependencies stabili
 | Ingestion | Prepared statement/adapter extensions | Arrow upload and advanced reads |
 | Enterprise security | Flight production listener | OIDC, mTLS, hardened transport |
 | High availability | Stable ticket/state contracts | Shared state and failover |
+| qcli JDBC driver | Unified connectivity release | Branded JDBC URL, Java artifact, and cross-engine certification |
 
 The second adapter is an architecture test. Expect small contract refinements, but reject changes that expose Databricks-specific concepts directly through generic frontend APIs. The third adapter should require fewer core changes; otherwise the abstraction remains too narrow.
 
@@ -1846,6 +1928,7 @@ The recommended first implementation sequence is:
 30. Add OIDC/JWT, mTLS, rotation, and hardened gRPC operations.
 31. Add shared state, object results, query leases, and multi-node failover.
 32. Publish the unified HTTP/Flight/ADBC/JDBC/ODBC connectivity release.
+33. Publish the branded qcli Type 4 JDBC driver and certify it across supported engines and JDKs.
 
 ## 15. Definition of done
 
