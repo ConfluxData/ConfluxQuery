@@ -1,5 +1,6 @@
 use qcli_auth::{
-    ApiKeyAuthenticator, AuthenticationError, Authenticator, generate_api_key_material,
+    ApiKeyAuthenticator, AuthenticationError, Authenticator, CompositeAuthenticator,
+    OidcAuthenticator, generate_api_key_material,
 };
 use qcli_config::{Config, ConfigError, ResolvedTarget, default_config_path};
 use qcli_core::{CoreError, QueryService, SessionManager};
@@ -229,10 +230,12 @@ struct ServeArguments {
     address: String,
     flight_address: Option<String>,
     auth_file: Option<PathBuf>,
+    oidc_file: Option<PathBuf>,
     trusted_proxy: bool,
     flight_trusted_proxy: bool,
     flight_tls_certificate: Option<PathBuf>,
     flight_tls_private_key: Option<PathBuf>,
+    flight_tls_client_ca: Option<PathBuf>,
     allowed_origins: Vec<String>,
 }
 
@@ -241,10 +244,12 @@ fn parse_serve_args(arguments: &[String]) -> Result<ServeArguments, AppError> {
         address: "127.0.0.1:8088".into(),
         flight_address: None,
         auth_file: None,
+        oidc_file: None,
         trusted_proxy: false,
         flight_trusted_proxy: false,
         flight_tls_certificate: None,
         flight_tls_private_key: None,
+        flight_tls_client_ca: None,
         allowed_origins: Vec::new(),
     };
     let mut index = 0;
@@ -258,8 +263,14 @@ fn parse_serve_args(arguments: &[String]) -> Result<ServeArguments, AppError> {
                 result.flight_trusted_proxy = true;
                 index += 1;
             }
-            "--bind" | "--flight-bind" | "--flight-tls-cert" | "--flight-tls-key"
-            | "--auth-file" | "--cors-origin" => {
+            "--bind"
+            | "--flight-bind"
+            | "--flight-tls-cert"
+            | "--flight-tls-key"
+            | "--flight-tls-client-ca"
+            | "--auth-file"
+            | "--oidc-file"
+            | "--cors-origin" => {
                 let flag = &arguments[index];
                 let value = arguments
                     .get(index + 1)
@@ -273,7 +284,11 @@ fn parse_serve_args(arguments: &[String]) -> Result<ServeArguments, AppError> {
                     "--flight-tls-key" => {
                         result.flight_tls_private_key = Some(PathBuf::from(value));
                     }
+                    "--flight-tls-client-ca" => {
+                        result.flight_tls_client_ca = Some(PathBuf::from(value));
+                    }
                     "--auth-file" => result.auth_file = Some(PathBuf::from(value)),
+                    "--oidc-file" => result.oidc_file = Some(PathBuf::from(value)),
                     "--cors-origin" => result.allowed_origins.push(value.clone()),
                     _ => unreachable!(),
                 }
@@ -302,6 +317,7 @@ fn flight_server_config(
         (Some(certificate), Some(private_key)) => Some(FlightTlsConfig {
             certificate: certificate.clone(),
             private_key: private_key.clone(),
+            client_ca: arguments.flight_tls_client_ca.clone(),
         }),
         (None, None) => None,
         _ => {
@@ -310,8 +326,15 @@ fn flight_server_config(
             ));
         }
     };
+    if arguments.flight_tls_client_ca.is_some() && tls.is_none() {
+        return Err(AppError::Usage(
+            "--flight-tls-client-ca requires --flight-tls-cert and --flight-tls-key".into(),
+        ));
+    }
     if address.is_some() && !has_authenticator {
-        return Err(AppError::Usage("--flight-bind requires --auth-file".into()));
+        return Err(AppError::Usage(
+            "--flight-bind requires --auth-file or --oidc-file".into(),
+        ));
     }
     Ok((
         address,
@@ -330,12 +353,15 @@ async fn serve_gateway(path: &Path, arguments: ServeArguments) -> Result<(), App
             arguments.address
         ))
     })?;
-    let authenticator: Option<Arc<dyn Authenticator>> = arguments
-        .auth_file
-        .as_deref()
-        .map(ApiKeyAuthenticator::load)
-        .transpose()?
-        .map(|value| Arc::new(value) as Arc<dyn Authenticator>);
+    let mut providers = Vec::<Arc<dyn Authenticator>>::new();
+    if let Some(path) = arguments.auth_file.as_deref() {
+        providers.push(Arc::new(ApiKeyAuthenticator::load(path)?));
+    }
+    if let Some(path) = arguments.oidc_file.as_deref() {
+        providers.push(Arc::new(OidcAuthenticator::load(path)?));
+    }
+    let authenticator = (!providers.is_empty())
+        .then(|| Arc::new(CompositeAuthenticator::new(providers)) as Arc<dyn Authenticator>);
     let (flight, flight_config) = flight_server_config(&arguments, authenticator.is_some())?;
     let listener = bind_http(address, arguments.trusted_proxy, authenticator.is_some())
         .await
@@ -675,10 +701,11 @@ fn print_help() {
     println!("  target capabilities NAME  Show supported engine capabilities");
     println!("  auth key create ID   Generate an API key and Argon2id hash");
     println!(
-        "  serve [--bind ADDRESS] [--auth-file PATH] [--trusted-proxy] [--cors-origin ORIGIN]"
+        "  serve [--bind ADDRESS] [--auth-file PATH] [--oidc-file PATH] [--trusted-proxy] [--cors-origin ORIGIN]"
     );
     println!("        [--flight-bind ADDRESS] [--flight-tls-cert PATH --flight-tls-key PATH]");
     println!("        [--flight-trusted-proxy]");
+    println!("        [--flight-tls-cert PATH --flight-tls-key PATH --flight-tls-client-ca PATH]");
 }
 
 #[cfg(test)]
@@ -709,10 +736,14 @@ mod tests {
             "127.0.0.1:32010".into(),
             "--auth-file".into(),
             "auth.toml".into(),
+            "--oidc-file".into(),
+            "oidc.toml".into(),
             "--flight-tls-cert".into(),
             "server.pem".into(),
             "--flight-tls-key".into(),
             "server.key".into(),
+            "--flight-tls-client-ca".into(),
+            "client-ca.pem".into(),
         ])
         .unwrap();
         assert_eq!(arguments.flight_address.as_deref(), Some("127.0.0.1:32010"));
@@ -724,8 +755,12 @@ mod tests {
             arguments.flight_tls_private_key.as_deref(),
             Some(Path::new("server.key"))
         );
+        assert_eq!(arguments.oidc_file.as_deref(), Some(Path::new("oidc.toml")));
         let (_, config) = flight_server_config(&arguments, true).unwrap();
-        assert!(config.tls.is_some());
+        assert_eq!(
+            config.tls.unwrap().client_ca.as_deref(),
+            Some(Path::new("client-ca.pem"))
+        );
     }
 
     #[test]
@@ -742,6 +777,15 @@ mod tests {
         ])
         .unwrap();
         assert!(flight_server_config(&incomplete_tls, true).is_err());
+
+        let client_ca_without_tls = parse_serve_args(&[
+            "--flight-bind".into(),
+            "127.0.0.1:32010".into(),
+            "--flight-tls-client-ca".into(),
+            "client-ca.pem".into(),
+        ])
+        .unwrap();
+        assert!(flight_server_config(&client_ca_without_tls, true).is_err());
     }
 
     #[tokio::test]

@@ -38,7 +38,7 @@ use qcli_driver_api::{
 };
 use qcli_service::{GatewayService, ResultBatchReader, ServiceError, ServiceErrorKind};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -52,7 +52,7 @@ use tokio::sync::mpsc;
 use tonic::metadata::MetadataValue;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::server::TcpIncoming;
-use tonic::transport::{Identity, Server, ServerTlsConfig};
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use uuid::Uuid;
 
@@ -153,6 +153,7 @@ mod session_proto {
 pub struct FlightTlsConfig {
     pub certificate: PathBuf,
     pub private_key: PathBuf,
+    pub client_ca: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +165,9 @@ pub struct FlightServerConfig {
     pub keepalive_timeout: Duration,
     pub ticket_ttl: Duration,
     pub session_ttl: Duration,
+    pub max_concurrent_streams: u32,
+    pub max_connection_age: Duration,
+    pub max_connection_age_grace: Duration,
     pub tls: Option<FlightTlsConfig>,
 }
 
@@ -177,6 +181,9 @@ impl Default for FlightServerConfig {
             keepalive_timeout: Duration::from_secs(10),
             ticket_ttl: Duration::from_secs(15 * 60),
             session_ttl: Duration::from_secs(30 * 60),
+            max_concurrent_streams: 64,
+            max_connection_age: Duration::from_secs(30 * 60),
+            max_connection_age_grace: Duration::from_secs(60),
             tls: None,
         }
     }
@@ -1423,12 +1430,25 @@ pub async fn serve_flight(
     );
     let auth = authenticator.clone();
     let trusted_proxy = config.trusted_proxy;
+    let require_client_certificate = config
+        .tls
+        .as_ref()
+        .is_some_and(|tls| tls.client_ca.is_some());
     let interceptor = move |mut request: Request<()>| {
         enforce_proxy_policy(&request, trusted_proxy)?;
         let credential = bearer(request.metadata())?;
-        let principal = auth
+        let mut principal = auth
             .authenticate_immediate(credential)
             .map_err(authentication_status)?;
+        if require_client_certificate {
+            let certificate = request
+                .peer_certs()
+                .and_then(|certificates| certificates.first().cloned())
+                .ok_or_else(|| {
+                    Status::unauthenticated("a verified client certificate is required")
+                })?;
+            principal.id = mtls_bound_principal_id(&principal.id, certificate.as_ref());
+        }
         request.extensions_mut().insert(principal);
         Ok(request)
     };
@@ -1443,6 +1463,11 @@ pub async fn serve_flight(
         .await;
 
     let mut server = Server::builder()
+        .load_shed(true)
+        .concurrency_limit_per_connection(config.max_concurrent_streams as usize)
+        .max_concurrent_streams(config.max_concurrent_streams)
+        .max_connection_age(config.max_connection_age)
+        .max_connection_age_grace(config.max_connection_age_grace)
         .timeout(config.request_timeout)
         .http2_keepalive_interval(Some(config.keepalive_interval))
         .http2_keepalive_timeout(Some(config.keepalive_timeout))
@@ -1460,9 +1485,18 @@ pub async fn serve_flight(
                 tls.private_key.display()
             ))
         })?;
-        server = server.tls_config(
-            ServerTlsConfig::new().identity(Identity::from_pem(certificate, private_key)),
-        )?;
+        let mut tls_config =
+            ServerTlsConfig::new().identity(Identity::from_pem(certificate, private_key));
+        if let Some(client_ca) = &tls.client_ca {
+            let client_ca = std::fs::read(client_ca).map_err(|error| {
+                FlightServerError::Configuration(format!(
+                    "{}: cannot read Flight client CA: {error}",
+                    client_ca.display()
+                ))
+            })?;
+            tls_config = tls_config.client_ca_root(Certificate::from_pem(client_ca));
+        }
+        server = server.tls_config(tls_config)?;
     }
     let health_shutdown = async move {
         shutdown.await;
@@ -1476,6 +1510,11 @@ pub async fn serve_flight(
         .serve_with_incoming_shutdown(TcpIncoming::from(listener), health_shutdown)
         .await?;
     Ok(())
+}
+
+fn mtls_bound_principal_id(principal_id: &str, certificate_der: &[u8]) -> String {
+    let fingerprint = Sha256::digest(certificate_der);
+    format!("{principal_id}@mtls:{fingerprint:x}")
 }
 
 fn bearer(metadata: &tonic::metadata::MetadataMap) -> Result<&str, Status> {
@@ -3066,6 +3105,7 @@ mod tests {
                 tls: Some(FlightTlsConfig {
                     certificate: "missing.pem".into(),
                     private_key: "missing.key".into(),
+                    client_ca: None,
                 }),
                 ..FlightServerConfig::default()
             },
@@ -3078,6 +3118,7 @@ mod tests {
             tls: Some(FlightTlsConfig {
                 certificate: "definitely-missing.pem".into(),
                 private_key: "definitely-missing.key".into(),
+                client_ca: None,
             }),
             ..FlightServerConfig::default()
         };
@@ -3098,5 +3139,14 @@ mod tests {
                 .to_string()
                 .contains("cannot read Flight TLS certificate")
         );
+
+        let first = mtls_bound_principal_id("analyst", b"client-certificate-one");
+        let second = mtls_bound_principal_id("analyst", b"client-certificate-two");
+        assert_ne!(first, second);
+        assert_eq!(
+            first,
+            mtls_bound_principal_id("analyst", b"client-certificate-one")
+        );
+        assert!(first.starts_with("analyst@mtls:"));
     }
 }

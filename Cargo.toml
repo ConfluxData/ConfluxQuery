@@ -40,6 +40,7 @@ base64 = "0.22.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 futures-util = "0.3"
 hmac = "0.12.1"
+jsonwebtoken = { version = "10.2.0", default-features = false, features = ["rust_crypto"] }
 prost = "0.14.4"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1.0", features = ["derive"] }

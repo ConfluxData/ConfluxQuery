@@ -86,8 +86,15 @@ qcli serve \
   --auth-file ~/.qcli/http-auth.toml \
   --flight-bind 0.0.0.0:32010 \
   --flight-tls-cert /path/to/server-chain.pem \
-  --flight-tls-key /path/to/server-key.pem
+  --flight-tls-key /path/to/server-key.pem \
+  --flight-tls-client-ca /path/to/client-ca.pem
 ```
+
+For enterprise callers, `--oidc-file` validates JWT signature, issuer,
+audience, expiry, subject, and group-to-target policy. It can run alongside
+API keys. The optional client CA requires mTLS and binds Flight resource
+ownership to the verified certificate. See the
+[enterprise identity and transport guide](docs/enterprise-identity-and-transport.md).
 
 or explicit `--flight-trusted-proxy`, in which case the trusted gRPC proxy must
 supply `x-forwarded-proto: https`. See the
@@ -104,9 +111,9 @@ The project is under sequenced implementation. See the [product design](docs/pro
 
 ## Current milestone
 
-Milestone 17 lets standard database clients browse the authenticated session's
-target catalogs, schemas, tables, columns, table types, and SQL types. See the
-[Milestone 17 notes](docs/milestones/milestone-17-notes.md).
+Milestone 22 adds shared OIDC policy, Flight mTLS identity binding, hot JWKS
+rotation, and hardened connection policy. See the
+[Milestone 22 notes](docs/milestones/milestone-22-notes.md).
 
 ## Build
 

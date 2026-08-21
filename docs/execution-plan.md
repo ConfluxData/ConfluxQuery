@@ -384,7 +384,7 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 | M19 — ADBC and JDBC compatibility | Complete | Pass supported ADBC and JDBC client profiles |
 | M20 — ODBC and BI compatibility | In progress | Connect approved ODBC and representative BI clients |
 | M21 — Ingestion and advanced transfer | Complete | Upload Arrow batches and use scalable multi-endpoint results |
-| M22 — Enterprise identity and transport | Pending | Operate Flight SQL with OIDC, mTLS, rotation, and hardened gRPC |
+| M22 — Enterprise identity and transport | Complete | Operate Flight SQL with OIDC, mTLS, rotation, and hardened gRPC |
 | M23 — High availability | Pending | Share sessions/results and survive node failure |
 | M24 — Unified connectivity release | Pending | Publish supported HTTP, Flight SQL, ADBC, JDBC, and ODBC workflows |
 | M25 — qcli JDBC driver | Pending | Publish a branded Type 4 JDBC driver with certified cross-engine behavior |
@@ -954,9 +954,9 @@ Must demonstrate:
 
 - JWT/OIDC validation, issuer/audience policy, group/role mapping, and JWKS
   rotation.
-- mTLS identity mapping and optional OAuth token exchange.
-- Direct Flight TLS, gRPC-aware proxy mode, certificate reload, and connection
-  rotation.
+- mTLS identity mapping and an extensible outbound credential-provider boundary.
+- Direct Flight TLS, gRPC-aware proxy mode, rolling certificate replacement,
+  and bounded connection rotation.
 - Per-principal connection/stream/query quotas and security telemetry.
 - Shared HTTP/Flight authentication and audit semantics.
 

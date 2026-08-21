@@ -1190,7 +1190,12 @@ Required controls:
 - Do not log SQL by default.
 - Record caller, target, query ID, status, and timing for audit purposes.
 
-A shared bearer token is acceptable only for local development. Multi-user deployment should use OIDC/JWT or an authenticated gateway.
+A shared bearer token is acceptable only for local development. Multi-user
+deployment can validate OIDC/JWT directly for both HTTP and Flight SQL. Flight
+SQL can additionally require a CA-verified client certificate and binds
+resource ownership to its fingerprint. See
+`docs/enterprise-identity-and-transport.md` for configuration and the separate
+inbound-caller/outbound-warehouse identity boundaries.
 
 The product must explicitly choose whether a query runs as a shared service identity, propagated caller identity, or an authorized named credential profile. Shared service identities are simplest but carry the greatest privilege-sharing risk.
 
@@ -1222,11 +1227,12 @@ Representative production startup:
 
 ```text
 qcli serve \
-  --http-bind 127.0.0.1:8088 \
+  --bind 127.0.0.1:8088 \
   --flight-bind 0.0.0.0:32010 \
-  --auth-file ~/.qcli/http-auth.toml \
-  --tls-cert /etc/qcli/tls.crt \
-  --tls-key /etc/qcli/tls.key
+  --oidc-file /etc/qcli/oidc.toml \
+  --flight-tls-cert /etc/qcli/tls.crt \
+  --flight-tls-key /etc/qcli/tls.key \
+  --flight-tls-client-ca /etc/qcli/client-ca.pem
 ```
 
 HTTP and Flight SQL must share one protocol-neutral `qcli-service` layer.
