@@ -169,6 +169,7 @@ pub struct FlightServerConfig {
     pub max_connection_age: Duration,
     pub max_connection_age_grace: Duration,
     pub tls: Option<FlightTlsConfig>,
+    pub shared_signing_key: Option<[u8; 32]>,
 }
 
 impl Default for FlightServerConfig {
@@ -185,6 +186,7 @@ impl Default for FlightServerConfig {
             max_connection_age: Duration::from_secs(30 * 60),
             max_connection_age_grace: Duration::from_secs(60),
             tls: None,
+            shared_signing_key: None,
         }
     }
 }
@@ -302,11 +304,18 @@ impl QcliFlightSql {
     }
 
     #[must_use]
+    pub fn with_shared_signing_key(mut self, key: [u8; 32]) -> Self {
+        self.tickets = Arc::new(TicketSigner { key });
+        self.sessions = Arc::new(SessionSigner { key });
+        self
+    }
+
+    #[must_use]
     pub fn gateway(&self) -> &GatewayService {
         &self.gateway
     }
 
-    fn session_from_request<T>(
+    async fn session_from_request<T>(
         &self,
         request: &Request<T>,
         principal: &AuthenticatedPrincipal,
@@ -317,7 +326,8 @@ impl QcliFlightSql {
         let payload = self.sessions.verify(token.as_bytes(), &principal.id)?;
         let snapshot = self
             .gateway
-            .session(principal, &payload.session_id)
+            .session_clustered(principal, &payload.session_id)
+            .await
             .map_err(service_error_status)?;
         if snapshot.version != payload.session_version {
             return Err(Status::aborted(
@@ -350,7 +360,7 @@ impl QcliFlightSql {
         Ok(())
     }
 
-    fn set_session_options(
+    async fn set_session_options(
         &self,
         request: &Request<Action>,
     ) -> Result<Response<<Self as FlightService>::DoActionStream>, Status> {
@@ -360,7 +370,7 @@ impl QcliFlightSql {
         };
 
         let principal = required_principal(request)?.clone();
-        let current = self.session_from_request(request, &principal)?;
+        let current = self.session_from_request(request, &principal).await?;
         let input = SetSessionOptionsRequest::decode(request.get_ref().body.as_ref())
             .map_err(|_| Status::invalid_argument("SetSessionOptions body is malformed"))?;
         let mut target = None;
@@ -417,20 +427,21 @@ impl QcliFlightSql {
 
         let snapshot = if let Some(current) = current {
             self.gateway
-                .mutate_session(
+                .mutate_session_clustered(
                     &principal,
                     &current.session_id,
                     current.session_version,
                     target.as_deref(),
                     overrides,
                 )
+                .await
                 .map_err(service_error_status)?
         } else {
             let target = target.ok_or_else(|| {
                 Status::invalid_argument("qcli.target is required when creating a Flight session")
             })?;
             self.gateway
-                .create_session(
+                .create_session_clustered(
                     &principal,
                     &target,
                     overrides
@@ -438,6 +449,7 @@ impl QcliFlightSql {
                         .filter_map(|(name, value)| value.map(|value| (name, value)))
                         .collect(),
                 )
+                .await
                 .map_err(service_error_status)?
         };
         let mut response =
@@ -446,7 +458,7 @@ impl QcliFlightSql {
         Ok(response)
     }
 
-    fn get_session_options(
+    async fn get_session_options(
         &self,
         request: &Request<Action>,
     ) -> Result<Response<<Self as FlightService>::DoActionStream>, Status> {
@@ -456,11 +468,13 @@ impl QcliFlightSql {
             .map_err(|_| Status::invalid_argument("GetSessionOptions body is malformed"))?;
         let principal = required_principal(request)?.clone();
         let current = self
-            .session_from_request(request, &principal)?
+            .session_from_request(request, &principal)
+            .await?
             .ok_or_else(|| Status::not_found("Flight session cookie is required"))?;
         let snapshot = self
             .gateway
-            .session(&principal, &current.session_id)
+            .session_clustered(&principal, &current.session_id)
+            .await
             .map_err(service_error_status)?;
         let mut options = std::collections::HashMap::from([
             (
@@ -489,7 +503,7 @@ impl QcliFlightSql {
         Ok(response)
     }
 
-    fn close_session(
+    async fn close_session(
         &self,
         request: &Request<Action>,
     ) -> Result<Response<<Self as FlightService>::DoActionStream>, Status> {
@@ -499,10 +513,12 @@ impl QcliFlightSql {
             .map_err(|_| Status::invalid_argument("CloseSession body is malformed"))?;
         let principal = required_principal(request)?.clone();
         let current = self
-            .session_from_request(request, &principal)?
+            .session_from_request(request, &principal)
+            .await?
             .ok_or_else(|| Status::not_found("Flight session cookie is required"))?;
         self.gateway
-            .close_session(&principal, &current.session_id)
+            .close_session_clustered(&principal, &current.session_id)
+            .await
             .map_err(service_error_status)?;
         let mut response = action_result_response(
             CloseSessionResult {
@@ -519,14 +535,14 @@ impl QcliFlightSql {
         Ok(response)
     }
 
-    fn metadata_request<T>(
+    async fn metadata_request<T>(
         &self,
         request: &Request<T>,
         principal: &AuthenticatedPrincipal,
         catalog: Option<String>,
         schema: Option<String>,
     ) -> Result<MetadataRequest, Status> {
-        if let Some(session) = self.session_from_request(request, principal)? {
+        if let Some(session) = self.session_from_request(request, principal).await? {
             self.gateway
                 .session_metadata_request(principal, &session.session_id, catalog, schema, None)
                 .map_err(service_error_status)
@@ -614,7 +630,7 @@ impl FlightSqlService for QcliFlightSql {
                 "qcli-result-partitions must be between 1 and 16",
             ));
         }
-        let session = self.session_from_request(&request, &principal)?;
+        let session = self.session_from_request(&request, &principal).await?;
         let status = if let Some(session) = &session {
             self.gateway
                 .submit_session_query(&principal, &session.session_id, query.query)
@@ -631,7 +647,8 @@ impl FlightSqlService for QcliFlightSql {
                     )
                 })?;
             self.gateway
-                .submit_stateless_query(&principal, target, BTreeMap::new(), query.query)
+                .submit_stateless_query_clustered(&principal, target, BTreeMap::new(), query.query)
+                .await
                 .map_err(service_error_status)?
         };
         let mut status = wait_for_schema(&self.gateway, &principal, &status.id).await?;
@@ -710,11 +727,13 @@ impl FlightSqlService for QcliFlightSql {
         let descriptor = request.get_ref().clone();
         let prepared = self
             .gateway
-            .prepared_statement(&principal, handle)
+            .prepared_statement_clustered(&principal, handle)
+            .await
             .map_err(service_error_status)?;
         let status = self
             .gateway
-            .execute_prepared_statement(&principal, handle)
+            .execute_prepared_statement_clustered(&principal, handle)
+            .await
             .map_err(service_error_status)?;
         query_flight_info(
             self,
@@ -809,7 +828,9 @@ impl FlightSqlService for QcliFlightSql {
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         let principal = required_principal(&request)?.clone();
-        let metadata_request = self.metadata_request(&request, &principal, None, None)?;
+        let metadata_request = self
+            .metadata_request(&request, &principal, None, None)
+            .await?;
         let metadata = self.gateway.metadata();
         let capabilities = metadata
             .capabilities(&metadata_request.engine)
@@ -838,7 +859,9 @@ impl FlightSqlService for QcliFlightSql {
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         let principal = required_principal(&request)?.clone();
-        let metadata_request = self.metadata_request(&request, &principal, None, None)?;
+        let metadata_request = self
+            .metadata_request(&request, &principal, None, None)
+            .await?;
         let catalogs = self
             .gateway
             .metadata()
@@ -861,8 +884,9 @@ impl FlightSqlService for QcliFlightSql {
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         let principal = required_principal(&request)?.clone();
-        let metadata_request =
-            self.metadata_request(&request, &principal, query.catalog.clone(), None)?;
+        let metadata_request = self
+            .metadata_request(&request, &principal, query.catalog.clone(), None)
+            .await?;
         let schemas = self
             .gateway
             .metadata()
@@ -885,8 +909,9 @@ impl FlightSqlService for QcliFlightSql {
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         let principal = required_principal(&request)?.clone();
-        let metadata_request =
-            self.metadata_request(&request, &principal, query.catalog.clone(), None)?;
+        let metadata_request = self
+            .metadata_request(&request, &principal, query.catalog.clone(), None)
+            .await?;
         let metadata = self.gateway.metadata();
         let objects = metadata
             .objects(metadata_request.clone())
@@ -933,7 +958,9 @@ impl FlightSqlService for QcliFlightSql {
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         let principal = required_principal(&request)?.clone();
-        let metadata_request = self.metadata_request(&request, &principal, None, None)?;
+        let metadata_request = self
+            .metadata_request(&request, &principal, None, None)
+            .await?;
         let objects = self
             .gateway
             .metadata()
@@ -963,7 +990,8 @@ impl FlightSqlService for QcliFlightSql {
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         let principal = required_principal(&request)?.clone();
-        self.metadata_request(&request, &principal, None, None)?;
+        self.metadata_request(&request, &principal, None, None)
+            .await?;
         let batch = query
             .into_builder(&self.xdbc_info)
             .build()
@@ -977,7 +1005,8 @@ impl FlightSqlService for QcliFlightSql {
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         let principal = required_principal(&request)?.clone();
-        self.metadata_request(&request, &principal, query.catalog, query.db_schema)?;
+        self.metadata_request(&request, &principal, query.catalog, query.db_schema)
+            .await?;
         encode_metadata_batch(
             empty_batch(primary_key_schema()),
             self.max_flight_data_bytes,
@@ -990,7 +1019,8 @@ impl FlightSqlService for QcliFlightSql {
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         let principal = required_principal(&request)?.clone();
-        self.metadata_request(&request, &principal, query.catalog, query.db_schema)?;
+        self.metadata_request(&request, &principal, query.catalog, query.db_schema)
+            .await?;
         encode_metadata_batch(
             empty_batch(foreign_key_schema()),
             self.max_flight_data_bytes,
@@ -1003,7 +1033,8 @@ impl FlightSqlService for QcliFlightSql {
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         let principal = required_principal(&request)?.clone();
-        self.metadata_request(&request, &principal, query.catalog, query.db_schema)?;
+        self.metadata_request(&request, &principal, query.catalog, query.db_schema)
+            .await?;
         encode_metadata_batch(
             empty_batch(foreign_key_schema()),
             self.max_flight_data_bytes,
@@ -1016,7 +1047,8 @@ impl FlightSqlService for QcliFlightSql {
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         let principal = required_principal(&request)?.clone();
-        self.metadata_request(&request, &principal, query.pk_catalog, query.pk_db_schema)?;
+        self.metadata_request(&request, &principal, query.pk_catalog, query.pk_db_schema)
+            .await?;
         encode_metadata_batch(
             empty_batch(foreign_key_schema()),
             self.max_flight_data_bytes,
@@ -1033,24 +1065,23 @@ impl FlightSqlService for QcliFlightSql {
             .tickets
             .verify(&ticket.statement_handle, &principal.id)?;
         wait_for_terminal(&self.gateway, &principal, &payload.query_id).await?;
-        let schema = self
-            .gateway
-            .query_schema(&principal, &payload.query_id)
-            .map_err(service_error_status)?;
         let reader = if payload.partitions == 1 {
             self.gateway
-                .result_reader(&principal, &payload.query_id)
+                .result_reader_clustered(&principal, &payload.query_id)
+                .await
                 .map_err(service_error_status)?
         } else {
             self.gateway
-                .result_partition_reader(
+                .result_partition_reader_clustered(
                     &principal,
                     &payload.query_id,
                     payload.partition,
                     payload.partitions,
                 )
+                .await
                 .map_err(service_error_status)?
         };
+        let schema = reader.schema();
         let batches = stream::try_unfold(reader, next_result_batch);
         let encoded = FlightDataEncoderBuilder::new()
             .with_schema(schema)
@@ -1069,7 +1100,8 @@ impl FlightSqlService for QcliFlightSql {
         let handle = prepared_handle(&query.prepared_statement_handle)?;
         let status = self
             .gateway
-            .execute_prepared_statement(&principal, handle)
+            .execute_prepared_statement_clustered(&principal, handle)
+            .await
             .map_err(service_error_status)?;
         wait_for_terminal(&self.gateway, &principal, &status.id).await?;
         let schema = self
@@ -1105,7 +1137,8 @@ impl FlightSqlService for QcliFlightSql {
         .await
         .map_err(Status::from)?;
         self.gateway
-            .bind_prepared_statement(&principal, handle, batches)
+            .bind_prepared_statement_clustered(&principal, handle, batches)
+            .await
             .map_err(service_error_status)?;
         Ok(DoPutPreparedStatementResult {
             prepared_statement_handle: Some(query.prepared_statement_handle),
@@ -1120,7 +1153,7 @@ impl FlightSqlService for QcliFlightSql {
         let principal = required_principal(&request)?.clone();
         let handle = prepared_handle(&query.prepared_statement_handle)?;
         self.gateway
-            .execute_prepared_update(&principal, handle)
+            .execute_prepared_update_clustered(&principal, handle)
             .await
             .map_err(service_error_status)
     }
@@ -1132,7 +1165,8 @@ impl FlightSqlService for QcliFlightSql {
     ) -> Result<i64, Status> {
         let principal = required_principal(&request)?.clone();
         let session = self
-            .session_from_request(&request, &principal)?
+            .session_from_request(&request, &principal)
+            .await?
             .ok_or_else(|| Status::failed_precondition("statement updates require a session"))?;
         self.gateway
             .execute_session_update(&principal, &session.session_id, query.query)
@@ -1178,7 +1212,7 @@ impl FlightSqlService for QcliFlightSql {
         };
 
         let principal = required_principal(&request)?.clone();
-        let contextual = self.session_from_request(&request, &principal)?;
+        let contextual = self.session_from_request(&request, &principal).await?;
         if query.temporary && contextual.is_none() {
             return Err(Status::failed_precondition(
                 "temporary ingestion requires a Flight session",
@@ -1310,9 +1344,11 @@ impl FlightSqlService for QcliFlightSql {
             return Err(Status::unimplemented("transactions are not supported"));
         }
         let principal = required_principal(&request)?.clone();
-        let prepared = if let Some(session) = self.session_from_request(&request, &principal)? {
+        let prepared = if let Some(session) =
+            self.session_from_request(&request, &principal).await?
+        {
             self.gateway
-                .create_prepared_statement(&principal, &session.session_id, query.query)
+                .create_prepared_statement_clustered(&principal, &session.session_id, query.query)
                 .await
         } else {
             let target = request
@@ -1345,7 +1381,8 @@ impl FlightSqlService for QcliFlightSql {
         let principal = required_principal(&request)?;
         let handle = prepared_handle(&query.prepared_statement_handle)?;
         self.gateway
-            .close_prepared_statement(principal, handle)
+            .close_prepared_statement_clustered(principal, handle)
+            .await
             .map_err(service_error_status)
     }
 
@@ -1381,9 +1418,9 @@ impl FlightSqlService for QcliFlightSql {
         request: Request<Action>,
     ) -> Result<Response<<Self as FlightService>::DoActionStream>, Status> {
         match request.get_ref().r#type.as_str() {
-            SET_SESSION_OPTIONS => self.set_session_options(&request),
-            GET_SESSION_OPTIONS => self.get_session_options(&request),
-            CLOSE_SESSION => self.close_session(&request),
+            SET_SESSION_OPTIONS => self.set_session_options(&request).await,
+            GET_SESSION_OPTIONS => self.get_session_options(&request).await,
+            CLOSE_SESSION => self.close_session(&request).await,
             action => Err(Status::invalid_argument(format!(
                 "unsupported Flight action '{action}'"
             ))),
@@ -1428,6 +1465,11 @@ pub async fn serve_flight(
         config.session_ttl,
         config.max_message_bytes.saturating_sub(1024),
     );
+    let service = if let Some(key) = config.shared_signing_key {
+        service.with_shared_signing_key(key)
+    } else {
+        service
+    };
     let auth = authenticator.clone();
     let trusted_proxy = config.trusted_proxy;
     let require_client_certificate = config
@@ -2004,7 +2046,8 @@ async fn wait_for_terminal(
 ) -> Result<qcli_service::QueryStatus, Status> {
     loop {
         let status = gateway
-            .query(principal, query_id)
+            .query_clustered(principal, query_id)
+            .await
             .map_err(service_error_status)?;
         if matches!(status.state.as_str(), "completed" | "cancelled" | "failed") {
             return Ok(status);
@@ -2313,7 +2356,10 @@ mod tests {
     use arrow_array::{Int64Array, StringArray};
     use arrow_flight::sql::TableDefinitionOptions;
     use arrow_flight::sql::client::FlightSqlServiceClient;
+    use futures_util::StreamExt;
+    use object_store::memory::InMemory;
     use qcli_auth::AuthenticationError;
+    use qcli_cluster::{MemoryClusterStateStore, SharedObjectStore};
     use qcli_config::Config;
     use qcli_driver_api::EngineAdapter;
     use qcli_driver_demo::DemoAdapter;
@@ -2392,6 +2438,78 @@ mod tests {
             .await
             .unwrap();
         (FlightSqlServiceClient::new(channel), shutdown_tx, task)
+    }
+
+    async fn server_with_gateway(
+        gateway: GatewayService,
+        config: FlightServerConfig,
+    ) -> (
+        FlightSqlServiceClient<Channel>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<Result<(), FlightServerError>>,
+    ) {
+        let listener = bind_flight("127.0.0.1:0".parse().unwrap(), &config)
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(serve_flight(
+            listener,
+            gateway,
+            Arc::new(StaticAuthenticator),
+            config,
+            async {
+                shutdown_rx.await.ok();
+            },
+        ));
+        let channel = Endpoint::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        (FlightSqlServiceClient::new(channel), shutdown_tx, task)
+    }
+
+    #[tokio::test]
+    async fn shared_ticket_and_result_cross_flight_nodes() {
+        let cluster = Arc::new(MemoryClusterStateStore::default());
+        let objects = Arc::new(SharedObjectStore::new(
+            Arc::new(InMemory::new()),
+            "flight-m23",
+        ));
+        let node_a = gateway().with_cluster(
+            "node-a",
+            cluster.clone(),
+            objects.clone(),
+            Duration::from_secs(1),
+        );
+        let node_b = gateway().with_cluster("node-b", cluster, objects, Duration::from_secs(1));
+        let config = FlightServerConfig {
+            shared_signing_key: Some([9_u8; 32]),
+            ..FlightServerConfig::default()
+        };
+        let (mut client_a, stop_a, task_a) = server_with_gateway(node_a, config.clone()).await;
+        let (mut client_b, stop_b, task_b) = server_with_gateway(node_b, config).await;
+        client_a.set_token("valid-key".into());
+        client_a.set_header("qcli-target", "demo");
+        client_b.set_token("valid-key".into());
+        let info = client_a
+            .execute("select * from sample".into(), None)
+            .await
+            .unwrap();
+        let mut stream = client_b
+            .do_get(info.endpoint[0].ticket.clone().unwrap())
+            .await
+            .unwrap();
+        let mut rows = 0;
+        while let Some(batch) = stream.next().await {
+            rows += batch.unwrap().num_rows();
+        }
+        assert_eq!(rows, 2);
+        stop_a.send(()).unwrap();
+        stop_b.send(()).unwrap();
+        task_a.await.unwrap().unwrap();
+        task_b.await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -2991,6 +3109,17 @@ mod tests {
         let mut tampered = ticket;
         tampered[0] ^= 1;
         assert!(signer.verify(&tampered, "analyst").is_err());
+
+        let shared_key = [7_u8; 32];
+        let node_a = TicketSigner { key: shared_key };
+        let node_b = TicketSigner { key: shared_key };
+        let cross_node = node_a
+            .issue("analyst", "query-cross-node", Duration::from_secs(30))
+            .unwrap();
+        assert_eq!(
+            node_b.verify(&cross_node, "analyst").unwrap().query_id,
+            "query-cross-node"
+        );
     }
 
     #[test]

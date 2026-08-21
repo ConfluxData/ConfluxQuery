@@ -11,6 +11,7 @@ arrow-array.workspace = true
 chrono.workspace = true
 qcli-config = { version = "0.1.0", path = "../qcli-config" }
 qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
+serde.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

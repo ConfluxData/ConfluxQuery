@@ -96,6 +96,20 @@ API keys. The optional client CA requires mTLS and binds Flight resource
 ownership to the verified certificate. See the
 [enterprise identity and transport guide](docs/enterprise-identity-and-transport.md).
 
+Optional highly available mode uses PostgreSQL for coordination and a separate
+object store for retained Arrow results:
+
+```text
+qcli serve \
+  --cluster-url "$QCLI_CLUSTER_DATABASE_URL" \
+  --node-id qcli-a \
+  --result-store-url s3://qcli-results/production \
+  --flight-signing-key /run/secrets/qcli-flight-signing-key
+```
+
+Standalone mode remains the default. See the
+[high-availability guide](docs/high-availability.md).
+
 or explicit `--flight-trusted-proxy`, in which case the trusted gRPC proxy must
 supply `x-forwarded-proto: https`. See the
 [Milestone 17 notes](docs/milestones/milestone-17-notes.md) for the protocol,
@@ -111,9 +125,10 @@ The project is under sequenced implementation. See the [product design](docs/pro
 
 ## Current milestone
 
-Milestone 22 adds shared OIDC policy, Flight mTLS identity binding, hot JWKS
-rotation, and hardened connection policy. See the
-[Milestone 22 notes](docs/milestones/milestone-22-notes.md).
+Milestone 23 adds optional PostgreSQL-coordinated multi-node operation, shared
+Arrow results, fenced ownership, distributed quotas, and node-independent
+Flight tickets. See the
+[Milestone 23 notes](docs/milestones/milestone-23-notes.md).
 
 ## Build
 

@@ -33,6 +33,8 @@ uuid.workspace = true
 workspace = true
 
 [dev-dependencies]
+object_store.workspace = true
 qcli-config = { version = "0.1.0", path = "../qcli-config" }
+qcli-cluster = { version = "0.1.0", path = "../qcli-cluster" }
 qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
 qcli-driver-demo = { version = "0.1.0", path = "../qcli-driver-demo" }

@@ -4,7 +4,9 @@ use arrow_array::RecordBatch;
 use arrow_ipc::reader::FileReader;
 use arrow_ipc::writer::FileWriter;
 use arrow_schema::{Schema, SchemaRef};
+use bytes::Bytes;
 use qcli_auth::AuthenticatedPrincipal;
+use qcli_cluster::{ClusterStateStore, QueryLease, ResultObjectStore, SharedResource};
 use qcli_config::{Config, ResolvedTarget};
 use qcli_core::{CoreError, QueryHandle, QueryItem, QueryService, SessionManager, SessionSnapshot};
 use qcli_driver_api::{
@@ -18,7 +20,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
@@ -128,7 +130,7 @@ pub struct ServiceEvent {
     pub terminal: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryStatus {
     pub id: String,
     pub session_id: String,
@@ -157,9 +159,22 @@ pub struct ResultBatchReader {
 enum ResultBatchReaderSource {
     Memory(std::vec::IntoIter<RecordBatch>),
     Spill(FileReader<std::fs::File>),
+    Shared(FileReader<std::io::Cursor<Bytes>>),
 }
 
 impl ResultBatchReader {
+    #[must_use]
+    pub fn schema(&self) -> SchemaRef {
+        match &self.source {
+            ResultBatchReaderSource::Memory(batches) => batches
+                .as_slice()
+                .first()
+                .map_or_else(|| Arc::new(Schema::empty()), RecordBatch::schema),
+            ResultBatchReaderSource::Spill(reader) => reader.schema(),
+            ResultBatchReaderSource::Shared(reader) => reader.schema(),
+        }
+    }
+
     /// Read the next retained Arrow batch without buffering later batches.
     ///
     /// # Errors
@@ -171,6 +186,9 @@ impl ResultBatchReader {
             let skipped = match &mut self.source {
                 ResultBatchReaderSource::Memory(batches) => batches.next(),
                 ResultBatchReaderSource::Spill(batches) => {
+                    batches.next().transpose().map_err(storage_service_error)?
+                }
+                ResultBatchReaderSource::Shared(batches) => {
                     batches.next().transpose().map_err(storage_service_error)?
                 }
             };
@@ -185,6 +203,9 @@ impl ResultBatchReader {
         let batch = match &mut self.source {
             ResultBatchReaderSource::Memory(batches) => batches.next(),
             ResultBatchReaderSource::Spill(batches) => {
+                batches.next().transpose().map_err(storage_service_error)?
+            }
+            ResultBatchReaderSource::Shared(batches) => {
                 batches.next().transpose().map_err(storage_service_error)?
             }
         };
@@ -286,6 +307,36 @@ struct ServiceState {
     limits: ServiceLimits,
     audit: Mutex<Arc<dyn AuditSink>>,
     shutting_down: AtomicBool,
+    cluster: Option<ClusterContext>,
+}
+
+#[derive(Clone)]
+struct ClusterContext {
+    node_id: String,
+    state: Arc<dyn ClusterStateStore>,
+    objects: Arc<dyn ResultObjectStore>,
+    lease_ttl: Duration,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SharedSession {
+    snapshot: SessionSnapshot,
+    quota_permit: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SharedQuery {
+    status: QueryStatus,
+    result_key: Option<String>,
+    batch_count: usize,
+    fencing_token: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SharedPrepared {
+    session_id: String,
+    sql: String,
+    parameters_key: Option<String>,
 }
 
 #[derive(Clone)]
@@ -318,7 +369,29 @@ impl GatewayService {
                 limits,
                 audit: Mutex::new(Arc::new(NullAuditSink)),
                 shutting_down: AtomicBool::new(false),
+                cluster: None,
             }),
+        }
+    }
+
+    #[must_use]
+    pub fn with_cluster(
+        self,
+        node_id: impl Into<String>,
+        state: Arc<dyn ClusterStateStore>,
+        objects: Arc<dyn ResultObjectStore>,
+        lease_ttl: Duration,
+    ) -> Self {
+        let mut service_state = Arc::try_unwrap(self.state)
+            .unwrap_or_else(|_| panic!("cluster must be configured before cloning the gateway"));
+        service_state.cluster = Some(ClusterContext {
+            node_id: node_id.into(),
+            state,
+            objects,
+            lease_ttl,
+        });
+        Self {
+            state: Arc::new(service_state),
         }
     }
 
@@ -440,6 +513,205 @@ impl GatewayService {
         Ok(snapshot)
     }
 
+    pub async fn create_session_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        target_name: &str,
+        overrides: BTreeMap<String, String>,
+    ) -> Result<SessionSnapshot, ServiceError> {
+        let Some(cluster) = &self.state.cluster else {
+            return self.create_session(principal, target_name, overrides);
+        };
+        self.ensure_available()?;
+        let permit = cluster
+            .state
+            .acquire_quota(
+                &principal.id,
+                "sessions",
+                principal.max_sessions,
+                self.state.limits.session_ttl,
+            )
+            .await
+            .map_err(cluster_service_error)?;
+        let snapshot = match self.create_session(principal, target_name, overrides) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                cluster.state.release_quota(&permit).await.ok();
+                return Err(error);
+            }
+        };
+        let resource = SharedResource {
+            resource_id: snapshot.id.clone(),
+            principal_id: principal.id.clone(),
+            kind: "session".into(),
+            version: 0,
+            payload: serde_json::to_value(SharedSession {
+                snapshot: snapshot.clone(),
+                quota_permit: permit.clone(),
+            })
+            .map_err(json_service_error)?,
+            expires_at: chrono_deadline(self.state.limits.session_ttl),
+        };
+        if let Err(error) = cluster.state.put_resource(resource, Some(0)).await {
+            self.close_session(principal, &snapshot.id).ok();
+            cluster.state.release_quota(&permit).await.ok();
+            return Err(cluster_service_error(error));
+        }
+        Ok(snapshot)
+    }
+
+    pub async fn session_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        session_id: &str,
+    ) -> Result<SessionSnapshot, ServiceError> {
+        if let Ok(snapshot) = self.session(principal, session_id) {
+            return Ok(snapshot);
+        }
+        let cluster = self.state.cluster.as_ref().ok_or_else(session_not_found)?;
+        let resource = cluster
+            .state
+            .get_resource("session", session_id, &principal.id)
+            .await
+            .map_err(cluster_service_error)?
+            .ok_or_else(session_not_found)?;
+        let shared = serde_json::from_value::<SharedSession>(resource.payload)
+            .map_err(json_service_error)?;
+        let target = self
+            .state
+            .config
+            .target(&shared.snapshot.target)
+            .cloned()
+            .ok_or_else(session_not_found)?;
+        self.state
+            .sessions
+            .restore(shared.snapshot.clone(), target)
+            .map_err(|error| core_error(&error))?;
+        self.state
+            .session_owners
+            .lock()
+            .expect("session owner mutex poisoned")
+            .insert(
+                shared.snapshot.id.clone(),
+                SessionOwner {
+                    principal: principal.id.clone(),
+                    last_access: Instant::now(),
+                },
+            );
+        Ok(shared.snapshot)
+    }
+
+    pub async fn submit_session_query_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        session_id: &str,
+        sql: String,
+    ) -> Result<QueryStatus, ServiceError> {
+        let snapshot = self.session_clustered(principal, session_id).await?;
+        let status = self.submit_query(principal, &snapshot, sql, None, false)?;
+        self.publish_cluster_query(principal, &status).await?;
+        Ok(status)
+    }
+
+    pub async fn submit_stateless_query_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        target_name: &str,
+        overrides: BTreeMap<String, String>,
+        sql: String,
+    ) -> Result<QueryStatus, ServiceError> {
+        let session = self
+            .create_session_clustered(principal, target_name, overrides)
+            .await?;
+        let status = self.submit_query(principal, &session, sql, None, true)?;
+        self.publish_cluster_query(principal, &status).await?;
+        Ok(status)
+    }
+
+    async fn publish_cluster_query(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        status: &QueryStatus,
+    ) -> Result<(), ServiceError> {
+        let Some(cluster) = &self.state.cluster else {
+            return Ok(());
+        };
+        let lease = cluster
+            .state
+            .claim_query(
+                &status.id,
+                &principal.id,
+                &cluster.node_id,
+                cluster.lease_ttl,
+            )
+            .await
+            .map_err(cluster_service_error)?;
+        put_shared_query(cluster, principal, status.clone(), None, 0, &lease).await?;
+        let service = self.clone();
+        let principal = principal.clone();
+        let query_id = status.id.clone();
+        tokio::spawn(async move {
+            service
+                .publish_query_completion(principal, query_id, lease)
+                .await;
+        });
+        Ok(())
+    }
+
+    async fn publish_query_completion(
+        &self,
+        principal: AuthenticatedPrincipal,
+        query_id: String,
+        mut lease: QueryLease,
+    ) {
+        let Some(cluster) = &self.state.cluster else {
+            return;
+        };
+        loop {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let Ok(mut status) = self.query(&principal, &query_id) else {
+                return;
+            };
+            if matches!(status.state.as_str(), "completed" | "failed" | "cancelled") {
+                let mut result_key = None;
+                let mut batch_count = 0;
+                if status.state == "completed"
+                    && let Ok(mut reader) = self.result_reader(&principal, &query_id)
+                    && let Ok((bytes, batches)) = encode_reader(&mut reader)
+                {
+                    let key = format!(
+                        "{}/{}.arrow",
+                        principal_object_prefix(&principal.id),
+                        query_id
+                    );
+                    if cluster.objects.put(&key, bytes).await.is_ok() {
+                        result_key = Some(key);
+                        batch_count = batches;
+                    } else {
+                        status.state = "failed".into();
+                        status.error = Some(QueryError {
+                            code: "shared_result_store".into(),
+                            message: "query completed but shared result retention failed".into(),
+                        });
+                    }
+                }
+                put_shared_query(cluster, &principal, status, result_key, batch_count, &lease)
+                    .await
+                    .ok();
+                cluster.state.release_query(&lease).await.ok();
+                return;
+            }
+            put_shared_query(cluster, &principal, status, None, 0, &lease)
+                .await
+                .ok();
+            if let Ok(renewed) = cluster.state.renew_query(&lease, cluster.lease_ttl).await {
+                lease = renewed;
+            } else {
+                return;
+            }
+        }
+    }
+
     pub fn session(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -467,6 +739,26 @@ impl GatewayService {
             .map_err(|error| core_error(&error))
     }
 
+    pub async fn update_session_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        session_id: &str,
+        expected_version: u64,
+        overrides: BTreeMap<String, String>,
+    ) -> Result<SessionSnapshot, ServiceError> {
+        self.mutate_session_clustered(
+            principal,
+            session_id,
+            expected_version,
+            None,
+            overrides
+                .into_iter()
+                .map(|(name, value)| (name, Some(value)))
+                .collect(),
+        )
+        .await
+    }
+
     pub fn switch_target(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -481,6 +773,23 @@ impl GatewayService {
             .sessions
             .switch_target(session_id, expected_version, target)
             .map_err(|error| core_error(&error))
+    }
+
+    pub async fn switch_target_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        session_id: &str,
+        expected_version: u64,
+        target_name: &str,
+    ) -> Result<SessionSnapshot, ServiceError> {
+        self.mutate_session_clustered(
+            principal,
+            session_id,
+            expected_version,
+            Some(target_name),
+            BTreeMap::new(),
+        )
+        .await
     }
 
     pub fn mutate_session(
@@ -500,6 +809,48 @@ impl GatewayService {
             .sessions
             .mutate(session_id, expected_version, target, overrides)
             .map_err(|error| core_error(&error))
+    }
+
+    pub async fn mutate_session_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        session_id: &str,
+        expected_version: u64,
+        target_name: Option<&str>,
+        overrides: BTreeMap<String, Option<String>>,
+    ) -> Result<SessionSnapshot, ServiceError> {
+        self.session_clustered(principal, session_id).await?;
+        let snapshot = self.mutate_session(
+            principal,
+            session_id,
+            expected_version,
+            target_name,
+            overrides,
+        )?;
+        if let Some(cluster) = &self.state.cluster {
+            let resource = cluster
+                .state
+                .get_resource("session", session_id, &principal.id)
+                .await
+                .map_err(cluster_service_error)?
+                .ok_or_else(session_not_found)?;
+            let mut shared: SharedSession =
+                serde_json::from_value(resource.payload.clone()).map_err(json_service_error)?;
+            shared.snapshot = snapshot.clone();
+            cluster
+                .state
+                .put_resource(
+                    SharedResource {
+                        payload: serde_json::to_value(shared).map_err(json_service_error)?,
+                        expires_at: chrono_deadline(self.state.limits.session_ttl),
+                        ..resource.clone()
+                    },
+                    Some(resource.version),
+                )
+                .await
+                .map_err(cluster_service_error)?;
+        }
+        Ok(snapshot)
     }
 
     pub fn close_session(
@@ -537,6 +888,36 @@ impl GatewayService {
             Some(session_id),
             None,
         );
+        Ok(())
+    }
+
+    pub async fn close_session_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        session_id: &str,
+    ) -> Result<(), ServiceError> {
+        self.session_clustered(principal, session_id).await?;
+        let shared = if let Some(cluster) = &self.state.cluster {
+            cluster
+                .state
+                .get_resource("session", session_id, &principal.id)
+                .await
+                .map_err(cluster_service_error)?
+                .and_then(|resource| serde_json::from_value::<SharedSession>(resource.payload).ok())
+        } else {
+            None
+        };
+        self.close_session(principal, session_id)?;
+        if let Some(cluster) = &self.state.cluster {
+            cluster
+                .state
+                .delete_resource("session", session_id, &principal.id)
+                .await
+                .map_err(cluster_service_error)?;
+            if let Some(shared) = shared {
+                cluster.state.release_quota(&shared.quota_permit).await.ok();
+            }
+        }
         Ok(())
     }
 
@@ -668,6 +1049,160 @@ impl GatewayService {
         }
     }
 
+    pub async fn create_prepared_statement_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        session_id: &str,
+        sql: String,
+    ) -> Result<PreparedStatementSnapshot, ServiceError> {
+        self.session_clustered(principal, session_id).await?;
+        let snapshot = self
+            .create_prepared_statement(principal, session_id, sql.clone())
+            .await?;
+        if let Some(cluster) = &self.state.cluster {
+            cluster
+                .state
+                .put_resource(
+                    SharedResource {
+                        resource_id: snapshot.handle.clone(),
+                        principal_id: principal.id.clone(),
+                        kind: "prepared".into(),
+                        version: 0,
+                        payload: serde_json::to_value(SharedPrepared {
+                            session_id: session_id.into(),
+                            sql,
+                            parameters_key: None,
+                        })
+                        .map_err(json_service_error)?,
+                        expires_at: chrono_deadline(self.state.limits.prepared_statement_ttl),
+                    },
+                    Some(0),
+                )
+                .await
+                .map_err(cluster_service_error)?;
+        }
+        Ok(snapshot)
+    }
+
+    pub async fn prepared_statement_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        handle: &str,
+    ) -> Result<PreparedStatementSnapshot, ServiceError> {
+        if let Ok(snapshot) = self.prepared_statement(principal, handle) {
+            return Ok(snapshot);
+        }
+        let cluster = self.state.cluster.as_ref().ok_or_else(prepared_not_found)?;
+        let resource = cluster
+            .state
+            .get_resource("prepared", handle, &principal.id)
+            .await
+            .map_err(cluster_service_error)?
+            .ok_or_else(prepared_not_found)?;
+        let shared: SharedPrepared =
+            serde_json::from_value(resource.payload).map_err(json_service_error)?;
+        let session = self
+            .session_clustered(principal, &shared.session_id)
+            .await?;
+        let metadata = self
+            .state
+            .queries
+            .prepare(session, shared.sql.clone())
+            .await
+            .map_err(|error| core_error(&error))?;
+        let parameters = if let Some(key) = shared.parameters_key {
+            let bytes = cluster
+                .objects
+                .get(&key)
+                .await
+                .map_err(cluster_service_error)?
+                .ok_or_else(prepared_not_found)?;
+            decode_batches(bytes)?
+        } else {
+            Vec::new()
+        };
+        let record = PreparedStatementRecord {
+            owner: principal.id.clone(),
+            session_id: shared.session_id,
+            owns_session: false,
+            sql: shared.sql,
+            dataset_schema: metadata.dataset_schema,
+            parameter_schema: metadata.parameter_schema,
+            parameters,
+            last_access: Instant::now(),
+        };
+        let snapshot = prepared_snapshot(handle, &record);
+        self.state
+            .prepared
+            .lock()
+            .expect("prepared mutex poisoned")
+            .insert(handle.into(), record);
+        Ok(snapshot)
+    }
+
+    pub async fn bind_prepared_statement_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        handle: &str,
+        parameters: Vec<RecordBatch>,
+    ) -> Result<PreparedStatementSnapshot, ServiceError> {
+        self.prepared_statement_clustered(principal, handle).await?;
+        let snapshot = self.bind_prepared_statement(principal, handle, parameters.clone())?;
+        if let Some(cluster) = &self.state.cluster {
+            let key = format!(
+                "{}/prepared/{handle}.arrow",
+                principal_object_prefix(&principal.id)
+            );
+            cluster
+                .objects
+                .put(&key, encode_batches(&parameters)?)
+                .await
+                .map_err(cluster_service_error)?;
+            let resource = cluster
+                .state
+                .get_resource("prepared", handle, &principal.id)
+                .await
+                .map_err(cluster_service_error)?
+                .ok_or_else(prepared_not_found)?;
+            let mut shared: SharedPrepared =
+                serde_json::from_value(resource.payload.clone()).map_err(json_service_error)?;
+            shared.parameters_key = Some(key);
+            cluster
+                .state
+                .put_resource(
+                    SharedResource {
+                        payload: serde_json::to_value(shared).map_err(json_service_error)?,
+                        expires_at: chrono_deadline(self.state.limits.prepared_statement_ttl),
+                        ..resource.clone()
+                    },
+                    Some(resource.version),
+                )
+                .await
+                .map_err(cluster_service_error)?;
+        }
+        Ok(snapshot)
+    }
+
+    pub async fn execute_prepared_statement_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        handle: &str,
+    ) -> Result<QueryStatus, ServiceError> {
+        let prepared = self.prepared_statement_clustered(principal, handle).await?;
+        let snapshot = self
+            .session_clustered(principal, &prepared.session_id)
+            .await?;
+        let status = self.submit_query(
+            principal,
+            &snapshot,
+            prepared.sql,
+            Some(prepared.parameters),
+            false,
+        )?;
+        self.publish_cluster_query(principal, &status).await?;
+        Ok(status)
+    }
+
     pub fn bind_prepared_statement(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -755,6 +1290,15 @@ impl GatewayService {
             .execute_prepared_update(snapshot, prepared.sql, prepared.parameters)
             .await
             .map_err(|error| core_error(&error))
+    }
+
+    pub async fn execute_prepared_update_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        handle: &str,
+    ) -> Result<i64, ServiceError> {
+        self.prepared_statement_clustered(principal, handle).await?;
+        self.execute_prepared_update(principal, handle).await
     }
 
     pub async fn execute_session_update(
@@ -864,6 +1408,23 @@ impl GatewayService {
         Ok(())
     }
 
+    pub async fn close_prepared_statement_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        handle: &str,
+    ) -> Result<(), ServiceError> {
+        self.prepared_statement_clustered(principal, handle).await?;
+        self.close_prepared_statement(principal, handle)?;
+        if let Some(cluster) = &self.state.cluster {
+            cluster
+                .state
+                .delete_resource("prepared", handle, &principal.id)
+                .await
+                .map_err(cluster_service_error)?;
+        }
+        Ok(())
+    }
+
     pub fn query(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -871,6 +1432,198 @@ impl GatewayService {
     ) -> Result<QueryStatus, ServiceError> {
         let record = self.owned_record(principal, query_id)?;
         Ok(query_status(&record))
+    }
+
+    pub async fn query_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        query_id: &str,
+    ) -> Result<QueryStatus, ServiceError> {
+        if let Ok(status) = self.query(principal, query_id) {
+            return Ok(status);
+        }
+        let cluster = self.state.cluster.as_ref().ok_or_else(query_not_found)?;
+        let resource = cluster
+            .state
+            .get_resource("query", query_id, &principal.id)
+            .await
+            .map_err(cluster_service_error)?
+            .ok_or_else(query_not_found)?;
+        serde_json::from_value::<SharedQuery>(resource.payload)
+            .map(|shared| shared.status)
+            .map_err(json_service_error)
+    }
+
+    pub async fn recover_query_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        query_id: &str,
+    ) -> Result<QueryStatus, ServiceError> {
+        let cluster = self.state.cluster.as_ref().ok_or_else(query_not_found)?;
+        let mut shared_resource = cluster
+            .state
+            .get_resource("query", query_id, &principal.id)
+            .await
+            .map_err(cluster_service_error)?
+            .ok_or_else(query_not_found)?;
+        let mut shared: SharedQuery =
+            serde_json::from_value(shared_resource.payload.clone()).map_err(json_service_error)?;
+        if matches!(
+            shared.status.state.as_str(),
+            "completed" | "failed" | "cancelled"
+        ) {
+            return Ok(shared.status);
+        }
+        let lease = cluster
+            .state
+            .claim_query(query_id, &principal.id, &cluster.node_id, cluster.lease_ttl)
+            .await
+            .map_err(cluster_service_error)?;
+        shared.status.state = "failed".into();
+        shared.status.error = Some(QueryError {
+            code: "orphaned_query".into(),
+            message: "the owning qcli node was lost and this adapter cannot reattach safely".into(),
+        });
+        shared.fencing_token = lease.fencing_token;
+        shared_resource.payload = serde_json::to_value(&shared).map_err(json_service_error)?;
+        shared_resource.expires_at = chrono_deadline(self.state.limits.result_ttl);
+        cluster
+            .state
+            .put_resource(shared_resource.clone(), Some(shared_resource.version))
+            .await
+            .map_err(cluster_service_error)?;
+        cluster.state.release_query(&lease).await.ok();
+        Ok(shared.status)
+    }
+
+    pub async fn result_reader_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        query_id: &str,
+    ) -> Result<ResultBatchReader, ServiceError> {
+        if let Ok(reader) = self.result_reader(principal, query_id) {
+            return Ok(reader);
+        }
+        let cluster = self.state.cluster.as_ref().ok_or_else(query_not_found)?;
+        let resource = cluster
+            .state
+            .get_resource("query", query_id, &principal.id)
+            .await
+            .map_err(cluster_service_error)?
+            .ok_or_else(query_not_found)?;
+        let shared: SharedQuery =
+            serde_json::from_value(resource.payload).map_err(json_service_error)?;
+        if shared.status.state != "completed" {
+            return Err(ServiceError::new(
+                ServiceErrorKind::FailedPrecondition,
+                "query_running",
+                "results are available after query completion",
+            ));
+        }
+        let key = shared.result_key.ok_or_else(|| {
+            ServiceError::new(
+                ServiceErrorKind::Internal,
+                "shared_result_missing",
+                "completed shared result is unavailable",
+            )
+        })?;
+        let bytes = cluster
+            .objects
+            .get(&key)
+            .await
+            .map_err(cluster_service_error)?
+            .ok_or_else(|| {
+                ServiceError::new(
+                    ServiceErrorKind::Internal,
+                    "shared_result_missing",
+                    "completed shared result is unavailable",
+                )
+            })?;
+        let reader = FileReader::try_new(std::io::Cursor::new(bytes), None)
+            .map_err(storage_service_error)?;
+        Ok(ResultBatchReader {
+            source: ResultBatchReaderSource::Shared(reader),
+            skip: 0,
+            remaining: None,
+        })
+    }
+
+    pub async fn result_page_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        query_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<ResultPage, ServiceError> {
+        if let Ok(page) = self.result_page(principal, query_id, offset, limit) {
+            return Ok(page);
+        }
+        let status = self.query_clustered(principal, query_id).await?;
+        let mut reader = self.result_reader_clustered(principal, query_id).await?;
+        let mut batches = Vec::new();
+        while let Some(batch) = reader.next_batch()? {
+            batches.push(batch);
+        }
+        let start = offset.min(status.rows);
+        let end = start.saturating_add(limit.max(1)).min(status.rows);
+        Ok(ResultPage {
+            batches: slice_batches(&batches, start, end),
+            total_rows: status.rows,
+            next_offset: (end < status.rows).then_some(end),
+        })
+    }
+
+    pub async fn result_partition_reader_clustered(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        query_id: &str,
+        partition: usize,
+        partitions: usize,
+    ) -> Result<ResultBatchReader, ServiceError> {
+        if let Ok(reader) = self.result_partition_reader(principal, query_id, partition, partitions)
+        {
+            return Ok(reader);
+        }
+        if partitions == 0 || partition >= partitions {
+            return Err(ServiceError::new(
+                ServiceErrorKind::InvalidArgument,
+                "invalid_result_partition",
+                "result partition is outside the advertised range",
+            ));
+        }
+        let cluster = self.state.cluster.as_ref().ok_or_else(query_not_found)?;
+        let resource = cluster
+            .state
+            .get_resource("query", query_id, &principal.id)
+            .await
+            .map_err(cluster_service_error)?
+            .ok_or_else(query_not_found)?;
+        let shared: SharedQuery =
+            serde_json::from_value(resource.payload).map_err(json_service_error)?;
+        let key = shared.result_key.ok_or_else(|| {
+            ServiceError::new(
+                ServiceErrorKind::FailedPrecondition,
+                "query_running",
+                "results are available after query completion",
+            )
+        })?;
+        let bytes = cluster
+            .objects
+            .get(&key)
+            .await
+            .map_err(cluster_service_error)?
+            .ok_or_else(query_not_found)?;
+        let source = ResultBatchReaderSource::Shared(
+            FileReader::try_new(std::io::Cursor::new(bytes), None)
+                .map_err(storage_service_error)?,
+        );
+        let start = shared.batch_count.saturating_mul(partition) / partitions;
+        let end = shared.batch_count.saturating_mul(partition + 1) / partitions;
+        Ok(ResultBatchReader {
+            source,
+            skip: start,
+            remaining: Some(end - start),
+        })
     }
 
     pub fn cancel(
@@ -1677,6 +2430,119 @@ fn push_event(record: &QueryRecord, event: &str, value: Value, terminal: bool) {
     record.events.send(entry).ok();
 }
 
+async fn put_shared_query(
+    cluster: &ClusterContext,
+    principal: &AuthenticatedPrincipal,
+    status: QueryStatus,
+    result_key: Option<String>,
+    batch_count: usize,
+    lease: &QueryLease,
+) -> Result<(), ServiceError> {
+    let resource = SharedResource {
+        resource_id: status.id.clone(),
+        principal_id: principal.id.clone(),
+        kind: "query".into(),
+        version: 0,
+        payload: serde_json::to_value(SharedQuery {
+            status,
+            result_key,
+            batch_count,
+            fencing_token: lease.fencing_token,
+        })
+        .map_err(json_service_error)?,
+        expires_at: chrono_deadline(Duration::from_secs(15 * 60)),
+    };
+    let current = cluster
+        .state
+        .get_resource("query", &resource.resource_id, &principal.id)
+        .await
+        .map_err(cluster_service_error)?;
+    cluster
+        .state
+        .put_resource(resource, current.map(|value| value.version).or(Some(0)))
+        .await
+        .map_err(cluster_service_error)?;
+    Ok(())
+}
+
+fn encode_reader(reader: &mut ResultBatchReader) -> Result<(Bytes, usize), ServiceError> {
+    let mut batches = Vec::new();
+    while let Some(batch) = reader.next_batch()? {
+        batches.push(batch);
+    }
+    let count = batches.len();
+    Ok((encode_batches(&batches)?, count))
+}
+
+fn encode_batches(batches: &[RecordBatch]) -> Result<Bytes, ServiceError> {
+    let schema = batches
+        .first()
+        .map_or_else(|| Arc::new(Schema::empty()), RecordBatch::schema);
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = FileWriter::try_new(cursor, &schema).map_err(storage_service_error)?;
+    for batch in batches {
+        writer.write(batch).map_err(storage_service_error)?;
+    }
+    let cursor = writer.into_inner().map_err(storage_service_error)?;
+    Ok(Bytes::from(cursor.into_inner()))
+}
+
+fn decode_batches(bytes: Bytes) -> Result<Vec<RecordBatch>, ServiceError> {
+    FileReader::try_new(std::io::Cursor::new(bytes), None)
+        .map_err(storage_service_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_service_error)
+}
+
+fn principal_object_prefix(principal: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    principal.hash(&mut hasher);
+    format!("principals/{:016x}", hasher.finish())
+}
+
+fn chrono_deadline(ttl: Duration) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::<chrono::Utc>::from(SystemTime::now() + ttl)
+}
+
+fn cluster_service_error(error: qcli_cluster::ClusterError) -> ServiceError {
+    let kind = match error.code {
+        "forbidden" => ServiceErrorKind::NotFound,
+        "quota_exhausted" => ServiceErrorKind::ResourceExhausted,
+        "version_conflict" | "lease_held" | "lease_lost" => ServiceErrorKind::Conflict,
+        _ => ServiceErrorKind::Internal,
+    };
+    ServiceError::new(kind, error.code, error.message)
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "used directly as Result::map_err"
+)]
+fn json_service_error(error: serde_json::Error) -> ServiceError {
+    ServiceError::new(
+        ServiceErrorKind::Internal,
+        "shared_state_json",
+        error.to_string(),
+    )
+}
+
+fn session_not_found() -> ServiceError {
+    ServiceError::new(
+        ServiceErrorKind::NotFound,
+        "session_not_found",
+        "session not found",
+    )
+}
+
+fn query_not_found() -> ServiceError {
+    ServiceError::new(
+        ServiceErrorKind::NotFound,
+        "query_not_found",
+        "query not found",
+    )
+}
+
 fn store_batch(
     query_id: &str,
     data: &mut QueryData,
@@ -1902,6 +2768,8 @@ mod tests {
     use arrow_array::{
         BinaryArray, Decimal128Array, ListArray, StringArray, TimestampMicrosecondArray,
     };
+    use object_store::memory::InMemory;
+    use qcli_cluster::{MemoryClusterStateStore, SharedObjectStore};
     use qcli_driver_demo::DemoAdapter;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2202,6 +3070,128 @@ mod tests {
                 .unwrap_err()
                 .kind,
             ServiceErrorKind::NotFound
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one end-to-end multi-node milestone profile"
+    )]
+    async fn clustered_nodes_share_sessions_queries_and_arrow_results_with_isolation() {
+        let cluster = Arc::new(MemoryClusterStateStore::default());
+        let objects = Arc::new(SharedObjectStore::new(Arc::new(InMemory::new()), "m23"));
+        let node = |node_id: &str| {
+            service(ServiceLimits::default()).with_cluster(
+                node_id,
+                cluster.clone(),
+                objects.clone(),
+                Duration::from_millis(20),
+            )
+        };
+        let node_a = node("node-a");
+        let node_b = node("node-b");
+        let analyst = principal("analyst");
+        let stranger = principal("stranger");
+        let session = node_a
+            .create_session_clustered(&analyst, "demo", BTreeMap::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            node_b
+                .session_clustered(&analyst, &session.id)
+                .await
+                .unwrap(),
+            session
+        );
+        assert_eq!(
+            node_b
+                .session_clustered(&stranger, &session.id)
+                .await
+                .unwrap_err()
+                .kind,
+            ServiceErrorKind::NotFound
+        );
+        let query = node_a
+            .submit_session_query_clustered(&analyst, &session.id, "select * from sample".into())
+            .await
+            .unwrap();
+        let terminal = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let status = node_b.query_clustered(&analyst, &query.id).await.unwrap();
+                if status.state == "completed" {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(terminal.rows, 2);
+        let mut reader = node_b
+            .result_reader_clustered(&analyst, &query.id)
+            .await
+            .unwrap();
+        assert_eq!(reader.next_batch().unwrap().unwrap().num_rows(), 2);
+        assert!(reader.next_batch().unwrap().is_none());
+        assert_eq!(
+            node_b
+                .query_clustered(&stranger, &query.id)
+                .await
+                .unwrap_err()
+                .kind,
+            ServiceErrorKind::NotFound
+        );
+
+        let prepared = node_a
+            .create_prepared_statement_clustered(&analyst, &session.id, "select ?".into())
+            .await
+            .unwrap();
+        let parameters = vec![
+            RecordBatch::try_from_iter([(
+                "value",
+                Arc::new(StringArray::from(vec!["shared-parameter"])) as _,
+            )])
+            .unwrap(),
+        ];
+        node_a
+            .bind_prepared_statement_clustered(&analyst, &prepared.handle, parameters.clone())
+            .await
+            .unwrap();
+        let prepared_query = node_b
+            .execute_prepared_statement_clustered(&analyst, &prepared.handle)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if node_a
+                    .query_clustered(&analyst, &prepared_query.id)
+                    .await
+                    .unwrap()
+                    .state
+                    == "completed"
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut reader = node_a
+            .result_reader_clustered(&analyst, &prepared_query.id)
+            .await
+            .unwrap();
+        let batch = reader.next_batch().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "shared-parameter"
         );
     }
 }

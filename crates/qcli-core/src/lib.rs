@@ -7,6 +7,7 @@ use qcli_driver_api::{
     CancellationSignal, DriverError, EngineAdapter, IngestRequest, IngestSource,
     PreparedStatementMetadata, QueryEvent, QueryRequest, QuerySink, QueryState,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,7 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSnapshot {
     pub id: String,
     pub version: u64,
@@ -73,6 +74,34 @@ impl Default for SessionManager {
 }
 
 impl SessionManager {
+    /// Hydrate a shared session into this node's execution cache.
+    ///
+    /// # Errors
+    /// Returns an error when the resolved target does not match the snapshot.
+    ///
+    /// # Panics
+    /// Panics if another thread poisoned the internal session lock.
+    pub fn restore(
+        &self,
+        snapshot: SessionSnapshot,
+        target: ResolvedTarget,
+    ) -> Result<(), CoreError> {
+        if snapshot.target != target.name || snapshot.engine != target.engine {
+            return Err(CoreError::SessionNotFound(snapshot.id));
+        }
+        let session = Session {
+            id: snapshot.id.clone(),
+            version: snapshot.version,
+            target,
+            overrides: snapshot.overrides,
+        };
+        self.sessions
+            .lock()
+            .expect("session mutex poisoned")
+            .insert(snapshot.id, session);
+        Ok(())
+    }
+
     /// Create a new version-one logical session for a resolved target.
     ///
     /// # Panics

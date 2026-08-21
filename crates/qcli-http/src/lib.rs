@@ -638,7 +638,8 @@ async fn create_session(
     overrides.extend(values(request.options)?);
     let snapshot = state
         .service
-        .create_session(&principal, &request.target, overrides)
+        .create_session_clustered(&principal, &request.target, overrides)
+        .await
         .map_err(service_error)?;
     Ok((StatusCode::CREATED, Json(snapshot.into())))
 }
@@ -661,7 +662,8 @@ async fn get_session(
     Ok(Json(
         state
             .service
-            .session(&principal, &session_id)
+            .session_clustered(&principal, &session_id)
+            .await
             .map_err(service_error)?
             .into(),
     ))
@@ -691,7 +693,8 @@ async fn update_session(
     overrides.extend(values(request.options)?);
     let snapshot = state
         .service
-        .update_session(&principal, &session_id, request.expected_version, overrides)
+        .update_session_clustered(&principal, &session_id, request.expected_version, overrides)
+        .await
         .map_err(service_error)?;
     Ok(Json(snapshot.into()))
 }
@@ -744,12 +747,13 @@ async fn switch_session_target(
 ) -> Result<Json<SessionResponse>, ApiError> {
     let snapshot = state
         .service
-        .switch_target(
+        .switch_target_clustered(
             &principal,
             &session_id,
             request.expected_version,
             &request.target,
         )
+        .await
         .map_err(service_error)?;
     Ok(Json(snapshot.into()))
 }
@@ -771,7 +775,8 @@ async fn delete_session(
 ) -> Result<StatusCode, ApiError> {
     state
         .service
-        .close_session(&principal, &session_id)
+        .close_session_clustered(&principal, &session_id)
+        .await
         .map_err(service_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -797,7 +802,8 @@ async fn submit_session_query(
 ) -> Result<(StatusCode, Json<QueryResponse>), ApiError> {
     let query = state
         .service
-        .submit_session_query(&principal, &session_id, request.sql)
+        .submit_session_query_clustered(&principal, &session_id, request.sql)
+        .await
         .map_err(service_error)?;
     Ok((StatusCode::ACCEPTED, Json(query.into())))
 }
@@ -823,7 +829,8 @@ async fn submit_stateless_query(
     overrides.extend(values(request.properties)?);
     let query = state
         .service
-        .submit_stateless_query(&principal, &request.target, overrides, request.sql)
+        .submit_stateless_query_clustered(&principal, &request.target, overrides, request.sql)
+        .await
         .map_err(service_error)?;
     Ok((StatusCode::ACCEPTED, Json(query.into())))
 }
@@ -846,7 +853,8 @@ async fn get_query(
     Ok(Json(
         state
             .service
-            .query(&principal, &query_id)
+            .query_clustered(&principal, &query_id)
+            .await
             .map_err(service_error)?
             .into(),
     ))
@@ -915,7 +923,8 @@ async fn get_results(
         .clamp(1, state.limits.max_page_rows);
     let page = state
         .service
-        .result_page(&principal, &query_id, offset, limit)
+        .result_page_clustered(&principal, &query_id, offset, limit)
+        .await
         .map_err(service_error)?;
     let next = page
         .next_offset

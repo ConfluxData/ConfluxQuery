@@ -2,6 +2,9 @@ use qcli_auth::{
     ApiKeyAuthenticator, AuthenticationError, Authenticator, CompositeAuthenticator,
     OidcAuthenticator, generate_api_key_material,
 };
+use qcli_cluster::{
+    ClusterStateStore, PostgresClusterStateStore, ResultObjectStore, SharedObjectStore,
+};
 use qcli_config::{Config, ConfigError, ResolvedTarget, default_config_path};
 use qcli_core::{CoreError, QueryService, SessionManager};
 use qcli_driver_api::{AdapterCapability, EngineAdapter, QueryEvent};
@@ -24,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 enum AppError {
@@ -237,6 +240,10 @@ struct ServeArguments {
     flight_tls_private_key: Option<PathBuf>,
     flight_tls_client_ca: Option<PathBuf>,
     allowed_origins: Vec<String>,
+    cluster_url: Option<String>,
+    node_id: Option<String>,
+    result_store_url: Option<String>,
+    flight_signing_key: Option<PathBuf>,
 }
 
 fn parse_serve_args(arguments: &[String]) -> Result<ServeArguments, AppError> {
@@ -251,6 +258,10 @@ fn parse_serve_args(arguments: &[String]) -> Result<ServeArguments, AppError> {
         flight_tls_private_key: None,
         flight_tls_client_ca: None,
         allowed_origins: Vec::new(),
+        cluster_url: None,
+        node_id: None,
+        result_store_url: None,
+        flight_signing_key: None,
     };
     let mut index = 0;
     while index < arguments.len() {
@@ -270,6 +281,10 @@ fn parse_serve_args(arguments: &[String]) -> Result<ServeArguments, AppError> {
             | "--flight-tls-client-ca"
             | "--auth-file"
             | "--oidc-file"
+            | "--cluster-url"
+            | "--node-id"
+            | "--result-store-url"
+            | "--flight-signing-key"
             | "--cors-origin" => {
                 let flag = &arguments[index];
                 let value = arguments
@@ -289,6 +304,12 @@ fn parse_serve_args(arguments: &[String]) -> Result<ServeArguments, AppError> {
                     }
                     "--auth-file" => result.auth_file = Some(PathBuf::from(value)),
                     "--oidc-file" => result.oidc_file = Some(PathBuf::from(value)),
+                    "--cluster-url" => result.cluster_url = Some(value.clone()),
+                    "--node-id" => result.node_id = Some(value.clone()),
+                    "--result-store-url" => result.result_store_url = Some(value.clone()),
+                    "--flight-signing-key" => {
+                        result.flight_signing_key = Some(PathBuf::from(value));
+                    }
                     "--cors-origin" => result.allowed_origins.push(value.clone()),
                     _ => unreachable!(),
                 }
@@ -341,12 +362,87 @@ fn flight_server_config(
         FlightServerConfig {
             trusted_proxy: arguments.flight_trusted_proxy,
             tls,
+            shared_signing_key: arguments
+                .flight_signing_key
+                .as_deref()
+                .map(read_signing_key)
+                .transpose()?,
             ..FlightServerConfig::default()
         },
     ))
 }
 
+fn read_signing_key(path: &Path) -> Result<[u8; 32], AppError> {
+    let bytes = fs::read(path).map_err(AppError::Input)?;
+    bytes
+        .try_into()
+        .map_err(|_| AppError::Usage("Flight signing key must contain exactly 32 bytes".into()))
+}
+
+async fn initialize_cluster(
+    arguments: &ServeArguments,
+) -> Result<
+    Option<(
+        Arc<PostgresClusterStateStore>,
+        Arc<dyn ResultObjectStore>,
+        String,
+    )>,
+    AppError,
+> {
+    let cluster = if let Some(url) = arguments.cluster_url.as_deref() {
+        if arguments.flight_address.is_some() && arguments.flight_signing_key.is_none() {
+            return Err(AppError::Usage(
+                "clustered Flight SQL requires --flight-signing-key".into(),
+            ));
+        }
+        let node_id = arguments
+            .node_id
+            .clone()
+            .unwrap_or_else(|| format!("qcli-{}", std::process::id()));
+        let store = Arc::new(
+            PostgresClusterStateStore::connect(url)
+                .await
+                .map_err(|error| AppError::Usage(format!("cluster store: {error}")))?,
+        );
+        store
+            .migrate()
+            .await
+            .map_err(|error| AppError::Usage(format!("cluster migration: {error}")))?;
+        store
+            .register_node(
+                &node_id,
+                env!("CARGO_PKG_VERSION"),
+                &["http".into(), "flight-sql".into()],
+                Duration::from_secs(30),
+            )
+            .await
+            .map_err(|error| AppError::Usage(format!("cluster registration: {error}")))?;
+        let result_url = arguments
+            .result_store_url
+            .as_deref()
+            .ok_or_else(|| AppError::Usage("--cluster-url requires --result-store-url".into()))?;
+        let objects = Arc::new(
+            SharedObjectStore::from_url(result_url)
+                .map_err(|error| AppError::Usage(format!("result store: {error}")))?,
+        ) as Arc<dyn ResultObjectStore>;
+        Some((store, objects, node_id))
+    } else {
+        if arguments.node_id.is_some() || arguments.result_store_url.is_some() {
+            return Err(AppError::Usage(
+                "--node-id and --result-store-url require --cluster-url".into(),
+            ));
+        }
+        None
+    };
+    Ok(cluster)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "composes the two serve frontends and shared shutdown lifecycle"
+)]
 async fn serve_gateway(path: &Path, arguments: ServeArguments) -> Result<(), AppError> {
+    let cluster = initialize_cluster(&arguments).await?;
     let address = arguments.address.parse().map_err(|error| {
         AppError::Usage(format!(
             "invalid HTTP bind address '{}': {error}",
@@ -372,7 +468,31 @@ async fn serve_gateway(path: &Path, arguments: ServeArguments) -> Result<(), App
         None
     };
 
-    let gateway = GatewayService::new(Config::load(path)?, adapters(), ServiceLimits::default());
+    let mut gateway =
+        GatewayService::new(Config::load(path)?, adapters(), ServiceLimits::default());
+    let mut cluster_drainer = None;
+    if let Some((store, objects, node_id)) = cluster {
+        gateway = gateway.with_cluster(
+            node_id.clone(),
+            store.clone(),
+            objects,
+            Duration::from_secs(30),
+        );
+        cluster_drainer = Some((store.clone(), node_id.clone()));
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                if store
+                    .renew_node(&node_id, Duration::from_secs(30))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
     let mut service = HttpService::from_gateway(gateway.clone(), HttpLimits::default());
     if let Some(authenticator) = &authenticator {
         service = service
@@ -385,9 +505,14 @@ async fn serve_gateway(path: &Path, arguments: ServeArguments) -> Result<(), App
     });
     eprintln!("qcli HTTP service listening on http://{address}");
     let Some(flight_listener) = flight_listener else {
+        let signal_gateway = gateway.clone();
         return service
-            .serve_with_shutdown(listener, async {
+            .serve_with_shutdown(listener, async move {
                 tokio::signal::ctrl_c().await.ok();
+                if let Some((store, node_id)) = cluster_drainer {
+                    store.set_draining(&node_id, true).await.ok();
+                }
+                signal_gateway.begin_shutdown();
             })
             .await
             .map_err(AppError::Server);
@@ -401,6 +526,9 @@ async fn serve_gateway(path: &Path, arguments: ServeArguments) -> Result<(), App
     let signal_gateway = gateway.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
+        if let Some((store, node_id)) = cluster_drainer {
+            store.set_draining(&node_id, true).await.ok();
+        }
         signal_gateway.begin_shutdown();
         shutdown_tx.send(()).ok();
     });
@@ -706,6 +834,8 @@ fn print_help() {
     println!("        [--flight-bind ADDRESS] [--flight-tls-cert PATH --flight-tls-key PATH]");
     println!("        [--flight-trusted-proxy]");
     println!("        [--flight-tls-cert PATH --flight-tls-key PATH --flight-tls-client-ca PATH]");
+    println!("        [--cluster-url POSTGRES_URL --node-id ID --result-store-url URL]");
+    println!("        [--flight-signing-key 32_BYTE_FILE]");
 }
 
 #[cfg(test)]
@@ -744,6 +874,12 @@ mod tests {
             "server.key".into(),
             "--flight-tls-client-ca".into(),
             "client-ca.pem".into(),
+            "--cluster-url".into(),
+            "postgresql://cluster".into(),
+            "--node-id".into(),
+            "node-a".into(),
+            "--result-store-url".into(),
+            "s3://qcli-results/test".into(),
         ])
         .unwrap();
         assert_eq!(arguments.flight_address.as_deref(), Some("127.0.0.1:32010"));
@@ -756,6 +892,7 @@ mod tests {
             Some(Path::new("server.key"))
         );
         assert_eq!(arguments.oidc_file.as_deref(), Some(Path::new("oidc.toml")));
+        assert_eq!(arguments.node_id.as_deref(), Some("node-a"));
         let (_, config) = flight_server_config(&arguments, true).unwrap();
         assert_eq!(
             config.tls.unwrap().client_ca.as_deref(),

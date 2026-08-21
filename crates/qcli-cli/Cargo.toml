@@ -9,6 +9,7 @@ version.workspace = true
 [dependencies]
 qcli-auth = { version = "0.1.0", path = "../qcli-auth" }
 qcli-config = { version = "0.1.0", path = "../qcli-config" }
+qcli-cluster = { version = "0.1.0", path = "../qcli-cluster" }
 qcli-core = { version = "0.1.0", path = "../qcli-core" }
 qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
 qcli-driver-demo = { version = "0.1.0", path = "../qcli-driver-demo" }

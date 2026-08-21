@@ -10,7 +10,10 @@ version.workspace = true
 arrow-array.workspace = true
 arrow-ipc.workspace = true
 arrow-schema.workspace = true
+bytes.workspace = true
+chrono.workspace = true
 qcli-auth = { version = "0.1.0", path = "../qcli-auth" }
+qcli-cluster = { version = "0.1.0", path = "../qcli-cluster" }
 qcli-config = { version = "0.1.0", path = "../qcli-config" }
 qcli-core = { version = "0.1.0", path = "../qcli-core" }
 qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
@@ -21,6 +24,7 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+object_store.workspace = true
 qcli-driver-demo = { version = "0.1.0", path = "../qcli-driver-demo" }
 
 [lints]
