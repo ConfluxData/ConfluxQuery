@@ -2,6 +2,17 @@
 
 qcli is one query shell for cloud data platforms. Initial engine targets are Trino, Databricks SQL, and Snowflake.
 
+The product manual is built with MkDocs Material:
+
+```text
+make docs-install
+make docs-serve
+```
+
+Validate with `make docs-check`. Maintainers can publish the complete static
+site to GitHub Pages with the single command `make docs-deploy` (equivalent to
+`python3 -m mkdocs gh-deploy --strict --force`).
+
 Architecture and delivery documentation:
 
 - [Product design](docs/product-design.md)
@@ -131,10 +142,8 @@ The project is under sequenced implementation. See the [product design](docs/pro
 
 ## Current milestone
 
-Milestone 23 adds optional PostgreSQL-coordinated multi-node operation, shared
-Arrow results, fenced ownership, distributed quotas, and node-independent
-Flight tickets. See the
-[Milestone 23 notes](docs/milestones/milestone-23-notes.md).
+Milestone 24.5 publishes the complete product, CLI, gateway, ecosystem,
+operations, and how-to manual as a tested static site.
 
 ## Build
 

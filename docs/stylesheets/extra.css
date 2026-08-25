@@ -1,0 +1,7 @@
+:root { --md-primary-fg-color: #4f5fe7; --md-accent-fg-color: #00a9ba; }
+.md-typeset h1 { font-weight: 700; letter-spacing: -.025em; }
+.md-typeset h2 { font-weight: 650; }
+.hero { padding: 2.4rem 0 1.4rem; max-width: 58rem; }
+.hero h1 { font-size: 2.6rem; margin-bottom: .5rem; }
+.hero p { font-size: 1.15rem; color: var(--md-default-fg-color--light); }
+.grid.cards > ul > li { border-radius: .6rem; }

@@ -17,6 +17,9 @@ All notable qcli changes are documented here. qcli follows semantic versioning.
   settings.
 - Operator guidance for TLS, identity, scaling, upgrades, rollback, and
   incidents.
+- A branded, searchable MkDocs product portal covering product rationale,
+  architecture, every CLI/server surface, ecosystem examples, and how-to
+  workflows, with strict CI builds and one-command GitHub Pages deployment.
 
 ## [0.1.0] - Unreleased
 

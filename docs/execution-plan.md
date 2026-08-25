@@ -387,6 +387,7 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 | M22 — Enterprise identity and transport | Complete | Operate Flight SQL with OIDC, mTLS, rotation, and hardened gRPC |
 | M23 — High availability | Complete | Share sessions/results and survive node failure |
 | M24 — Unified connectivity release | Complete | Publish and operate the supported gateway connectivity surfaces |
+| M24.5 — Product documentation portal | Complete | Publish a complete, tested product and operations manual as a static site |
 | M25 — qcli JDBC driver | Pending | Publish a branded Type 4 JDBC driver with certified cross-engine behavior |
 
 Allowed status values are `Pending`, `In progress`, `Blocked`, and `Complete`. A milestone becomes `Complete` only after its automated tests, live or deterministic demo, documentation, and milestone report are present.
@@ -1018,6 +1019,44 @@ Exit gate:
 - Load, backpressure, protocol, security, and multi-node gates pass.
 - `docs/milestones/milestone-24-notes.md` records the unified connectivity
   release evidence and accepted limitations.
+
+### M24.5 — Product documentation portal
+
+Demo:
+
+```text
+Build and serve one searchable documentation site that takes a new user from
+the qcli problem statement through CLI use, gateway integration, secure
+production operation, and troubleshooting.
+```
+
+Must demonstrate:
+
+- Product inspiration, problem statement, principles, evolution, support
+  boundaries, and layered architecture.
+- In-depth explanations and task-oriented guides for every released CLI,
+  HTTP, Flight SQL, ADBC, security, ingestion, and high-availability feature.
+- Exhaustive CLI global-option, command, interactive-command, configuration,
+  environment-variable, format, and exit-code reference with examples.
+- Complete server-mode concepts, API workflows, deployment, operations, and
+  Python, Java, Rust, Go, JavaScript, curl, ADBC, and JDBC examples.
+- Clear supported, experimental, and planned labels that agree with the
+  unified connectivity contract.
+- A branded, searchable, version-ready static site with strict navigation and
+  link validation.
+- Documentation build enforcement in pull-request and main-branch CI.
+- One-command local preview and one-command GitHub Pages deployment.
+
+Exit gate:
+
+- A strict clean-environment documentation build passes.
+- Documented CLI help is checked against the executable's actual help output.
+- Runnable code examples are syntax checked or exercised by conformance tests.
+- Every implemented product feature has a concept/reference page and at least
+  one relevant how-to path.
+- GitHub Pages publishing is reproducible from the repository.
+- `docs/milestones/milestone-24.5-notes.md` records the information
+  architecture, validation evidence, and accepted documentation limitations.
 
 ### M25 — qcli JDBC driver
 

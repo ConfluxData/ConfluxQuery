@@ -18,6 +18,20 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  documentation:
+    name: Product documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+      - run: python -m pip install -r requirements-docs.txt
+      - run: bash scripts/check-docs.sh
+
   quality:
     name: Format, lint, and docs
     runs-on: ubuntu-latest

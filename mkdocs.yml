@@ -1,0 +1,130 @@
+site_name: qcli
+site_description: One query CLI and gateway for Trino, Databricks SQL, and Snowflake
+site_url: https://deepakdixit.github.io/qcli/
+repo_url: https://github.com/deepakdixit/qcli
+repo_name: deepakdixit/qcli
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; qcli contributors
+
+theme:
+  name: material
+  language: en
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.tabs.link
+    - search.highlight
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Use dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Use light mode
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search
+  - redirects:
+      redirect_maps:
+        index-old.md: index.md
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+
+not_in_nav: |
+  milestones/*
+
+nav:
+  - Home: index.md
+  - Product:
+      - Why qcli: product/why-qcli.md
+      - Evolution: product/evolution.md
+      - Support policy: product/support-policy.md
+  - Get started:
+      - Install: getting-started/install.md
+      - CLI quickstart: getting-started/cli-quickstart.md
+      - Gateway quickstart: getting-started/server-quickstart.md
+  - Concepts:
+      - Architecture: concepts/architecture.md
+      - Configuration and targets: concepts/configuration.md
+      - Sessions, queries, and results: concepts/query-model.md
+      - Security and identity: concepts/security.md
+      - High availability: high-availability.md
+      - Ingestion and transfer: ingestion-and-advanced-transfer.md
+  - CLI:
+      - Complete command reference: reference/cli.md
+      - Interactive shell: reference/repl.md
+      - Configuration properties: reference/configuration.md
+      - Output and automation: guides/cli-automation.md
+      - Engine setup: guides/engines.md
+  - Gateway:
+      - Server mode: server/index.md
+      - HTTP API workflows: server/http.md
+      - Flight SQL: server/flight-sql.md
+      - Client ecosystem: server/clients.md
+      - Deployment and operations: operations.md
+      - Enterprise identity: enterprise-identity-and-transport.md
+  - How-to:
+      - Common tasks: guides/how-to.md
+      - Troubleshooting: guides/troubleshooting.md
+      - Releases and upgrades: releasing.md
+  - Reference:
+      - Compatibility: connectivity-compatibility.md
+      - Supported platforms: supported-platforms.md
+      - Feature status: reference/features.md
+      - Unified release contract: unified-connectivity-release.md
+      - Experimental ODBC/BI: odbc-bi-connectivity.md
+      - Product design record: product-design.md
+      - Feature roadmap: features-roadmap.md
+      - Execution plan: execution-plan.md
+      - Architecture decisions:
+          - DataFusion CLI decision: adr-001-independent-from-datafusion-cli.md
+          - Trino client decision: adr-002-trino-direct-http-protocol.md
+          - Authentication design: adr-003-extensible-authentication.md
+          - Warehouse clients: adr-004-databricks-snowflake-clients.md
+          - HTTP caller auth: adr-005-http-caller-authentication.md
+          - Flight SQL data plane: adr-006-flight-sql-data-plane.md
