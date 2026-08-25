@@ -154,3 +154,36 @@ jobs:
         run: |
           if [[ -f /tmp/qcli-m19-server.pid ]]; then kill "$(cat /tmp/qcli-m19-server.pid)" || true; fi
           cat /tmp/qcli-m19-server.log || true
+
+  release-gates:
+    name: Load, HA, packaging, and container gates
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: qcli_test
+          POSTGRES_DB: qcli_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d qcli_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: PostgreSQL fencing and distributed quota profile
+        run: cargo test -p qcli-cluster postgres_coordination_profile --locked -- --ignored
+        env:
+          QCLI_TEST_POSTGRES_URL: postgresql://postgres:qcli_test@127.0.0.1:5432/qcli_test
+      - name: Million-row bounded streaming profile
+        run: cargo test --release -p qcli-core million_rows_stream_in_bounded_batches_to_csv_and_jsonl --locked -- --ignored
+      - name: Build release archive
+        run: |
+          cargo build --release --locked -p qcli
+          bash scripts/package-release.sh x86_64-unknown-linux-gnu 0.1.0-ci
+          tar -tzf dist/qcli-0.1.0-ci-x86_64-unknown-linux-gnu.tar.gz
+      - name: Build and smoke container
+        run: |
+          docker build --tag qcli:ci .
+          docker run --rm qcli:ci --version

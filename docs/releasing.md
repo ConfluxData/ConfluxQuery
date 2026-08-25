@@ -69,11 +69,14 @@ The release workflow rejects a tag whose base version differs from
 
 1. repeats the full formatting, lint, and test gate;
 2. builds Linux x86-64/ARM64, macOS x86-64/ARM64, and Windows x86-64;
-3. packages the binary, README, man page, and shell completions;
+3. packages the binary, license, changelog, deployment assets, operational
+   guides, man page, and shell completions;
 4. creates SHA-256 checksums and an SPDX JSON SBOM;
 5. signs release files with keyless Sigstore;
 6. creates GitHub artifact provenance attestations;
-7. publishes a GitHub prerelease or stable release.
+7. builds and smoke-tests a non-root Linux AMD64 OCI server archive;
+8. runs packaged HTTP, ADBC, JDBC, HA, and bounded-load profiles;
+9. publishes a GitHub prerelease or stable release.
 
 The `github-release` environment should require approval for initial releases.
 

@@ -9,6 +9,7 @@
 | macOS | Intel | `x86_64-apple-darwin` | `.tar.gz` |
 | macOS | Apple Silicon | `aarch64-apple-darwin` | `.tar.gz` |
 | Windows | x86-64 | `x86_64-pc-windows-msvc` | `.zip` |
+| OCI container | Linux x86-64 | `linux/amd64` | `.oci.tar.gz` |
 
 Rust 1.86 is the minimum supported toolchain for source builds.
 
@@ -23,4 +24,3 @@ Rust 1.86 is the minimum supported toolchain for source builds.
 Live engine behavior is validated against configured test environments before a
 stable release. Exact server versions used for each release should be recorded
 in that release's notes.
-

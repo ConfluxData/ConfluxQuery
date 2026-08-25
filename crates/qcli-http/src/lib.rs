@@ -245,7 +245,11 @@ impl HttpService {
                 self.state.clone(),
                 enforce_http_operations,
             ));
-        api.merge(SwaggerUi::new("/docs").url("/openapi.json", openapi))
+        Router::new()
+            .route("/health/live", get(health_live))
+            .route("/health/ready", get(health_ready))
+            .merge(api)
+            .merge(SwaggerUi::new("/docs").url("/openapi.json", openapi))
             .with_state(self.state.clone())
     }
 
@@ -292,6 +296,18 @@ impl HttpService {
         cleanup.abort();
         state.service.wait_for_queries().await;
         result
+    }
+}
+
+async fn health_live() -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
+async fn health_ready(State(state): State<AppState>) -> StatusCode {
+    if state.service.is_shutting_down() {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::NO_CONTENT
     }
 }
 
@@ -1782,6 +1798,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(expired.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn health_is_unauthenticated_and_readiness_tracks_shutdown() {
+        let service = service(HttpLimits::default());
+        let gateway = service.gateway();
+        let router = service.router();
+        let live = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health/live")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(live.status(), StatusCode::NO_CONTENT);
+        let ready = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ready.status(), StatusCode::NO_CONTENT);
+        gateway.begin_shutdown();
+        let draining = router
+            .oneshot(
+                Request::builder()
+                    .uri("/health/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(draining.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

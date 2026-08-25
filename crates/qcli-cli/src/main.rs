@@ -364,6 +364,8 @@ fn flight_server_config(
             tls,
             shared_signing_key: arguments
                 .flight_signing_key
+                .clone()
+                .or_else(|| env::var_os("QCLI_FLIGHT_SIGNING_KEY").map(PathBuf::from))
                 .as_deref()
                 .map(read_signing_key)
                 .transpose()?,
@@ -389,15 +391,27 @@ async fn initialize_cluster(
     )>,
     AppError,
 > {
-    let cluster = if let Some(url) = arguments.cluster_url.as_deref() {
-        if arguments.flight_address.is_some() && arguments.flight_signing_key.is_none() {
+    let cluster_url = arguments
+        .cluster_url
+        .clone()
+        .or_else(|| env::var("QCLI_CLUSTER_URL").ok());
+    let result_store_url = arguments
+        .result_store_url
+        .clone()
+        .or_else(|| env::var("QCLI_RESULT_STORE_URL").ok());
+    let signing_key =
+        arguments.flight_signing_key.is_some() || env::var_os("QCLI_FLIGHT_SIGNING_KEY").is_some();
+    let cluster = if let Some(url) = cluster_url.as_deref() {
+        if arguments.flight_address.is_some() && !signing_key {
             return Err(AppError::Usage(
-                "clustered Flight SQL requires --flight-signing-key".into(),
+                "clustered Flight SQL requires --flight-signing-key or QCLI_FLIGHT_SIGNING_KEY"
+                    .into(),
             ));
         }
         let node_id = arguments
             .node_id
             .clone()
+            .or_else(|| env::var("QCLI_NODE_ID").ok())
             .unwrap_or_else(|| format!("qcli-{}", std::process::id()));
         let store = Arc::new(
             PostgresClusterStateStore::connect(url)
@@ -417,10 +431,11 @@ async fn initialize_cluster(
             )
             .await
             .map_err(|error| AppError::Usage(format!("cluster registration: {error}")))?;
-        let result_url = arguments
-            .result_store_url
-            .as_deref()
-            .ok_or_else(|| AppError::Usage("--cluster-url requires --result-store-url".into()))?;
+        let result_url = result_store_url.as_deref().ok_or_else(|| {
+            AppError::Usage(
+                "cluster mode requires --result-store-url or QCLI_RESULT_STORE_URL".into(),
+            )
+        })?;
         let objects = Arc::new(
             SharedObjectStore::from_url(result_url)
                 .map_err(|error| AppError::Usage(format!("result store: {error}")))?,

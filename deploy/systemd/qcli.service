@@ -1,0 +1,22 @@
+[Unit]
+Description=qcli query gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qcli
+Group=qcli
+EnvironmentFile=-/etc/qcli/runtime.env
+ExecStart=/usr/local/bin/qcli --config /etc/qcli/targets.env serve --bind 127.0.0.1:8088 --auth-file /etc/qcli/auth.toml --flight-bind 127.0.0.1:32010
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/qcli
+
+[Install]
+WantedBy=multi-user.target

@@ -88,26 +88,31 @@ impl Completer for SqlHelper {
         position: usize,
         _context: &rustyline::Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        let (start, word) = extract_word(line, position, None, |character| {
-            character.is_whitespace() || matches!(character, ',' | '(' | ')')
-        });
         let candidates = self
             .candidates
             .read()
-            .expect("completion candidates lock poisoned")
-            .iter()
-            .filter(|candidate| {
-                candidate
-                    .to_ascii_lowercase()
-                    .starts_with(&word.to_ascii_lowercase())
-            })
-            .map(|candidate| Pair {
-                display: candidate.clone(),
-                replacement: candidate.clone(),
-            })
-            .collect();
-        Ok((start, candidates))
+            .expect("completion candidates lock poisoned");
+        Ok(completion_pairs(&candidates, line, position))
     }
+}
+
+fn completion_pairs(candidates: &[String], line: &str, position: usize) -> (usize, Vec<Pair>) {
+    let (start, word) = extract_word(line, position, None, |character| {
+        character.is_whitespace() || matches!(character, ',' | '(' | ')')
+    });
+    let matches = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .to_ascii_lowercase()
+                .starts_with(&word.to_ascii_lowercase())
+        })
+        .map(|candidate| Pair {
+            display: candidate.clone(),
+            replacement: candidate.clone(),
+        })
+        .collect();
+    (start, matches)
 }
 impl Hinter for SqlHelper {
     type Hint = String;
@@ -920,5 +925,14 @@ mod tests {
         assert!(glob_matches(Some("event*"), "event_summary"));
         assert!(glob_matches(Some("sf?"), "sf1"));
         assert!(!glob_matches(Some("sf?"), "sf100"));
+    }
+
+    #[test]
+    fn completion_replaces_a_unique_metadata_prefix() {
+        let candidates = vec!["events".into(), "event_summary".into()];
+        let (start, matches) = completion_pairs(&candidates, "event_su", 8);
+        assert_eq!(start, 0);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].replacement, "event_summary");
     }
 }

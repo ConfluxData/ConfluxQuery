@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qcli
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: qcli
+  template:
+    metadata:
+      labels:
+        app: qcli
+    spec:
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: qcli
+          image: ghcr.io/OWNER/qcli:VERSION
+          args:
+            - --config
+            - /etc/qcli/targets.env
+            - serve
+            - --bind
+            - 0.0.0.0:8088
+            - --trusted-proxy
+            - --auth-file
+            - /etc/qcli/auth.toml
+            - --flight-bind
+            - 0.0.0.0:32010
+            - --flight-trusted-proxy
+          env:
+            - name: QCLI_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: QCLI_CLUSTER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: qcli-runtime
+                  key: cluster-url
+            - name: QCLI_RESULT_STORE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: qcli-runtime
+                  key: result-store-url
+            - name: QCLI_FLIGHT_SIGNING_KEY
+              value: /etc/qcli/signing-key
+          ports:
+            - { name: http, containerPort: 8088 }
+            - { name: flight, containerPort: 32010 }
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "2", memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/qcli, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: config
+          projected:
+            sources:
+              - secret: { name: qcli-targets, items: [{ key: targets.env, path: targets.env }, { key: auth.toml, path: auth.toml }] }
+              - secret: { name: qcli-runtime, items: [{ key: flight-signing-key, path: signing-key, mode: 256 }] }
+        - name: tmp
+          emptyDir: { sizeLimit: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qcli
+spec:
+  selector: { app: qcli }
+  ports:
+    - { name: http, port: 8088, targetPort: http }
+    - { name: flight, port: 32010, targetPort: flight }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: qcli
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: qcli }

@@ -159,6 +159,10 @@ jobs:
           cat /tmp/qcli-m19-server.log
           exit 1
       - run: pip install -r conformance/m19/python/requirements.txt
+      - name: HTTP API profile
+        run: python conformance/m24/http_profile.py
+        env:
+          QCLI_HTTP_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
       - name: Python ADBC 1.12
         run: python conformance/m19/python/profile.py
         env:
@@ -187,6 +191,8 @@ jobs:
         env:
           QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
           QCLI_FLIGHT_TARGET: demo
+      - name: Experimental ODBC profile integrity
+        run: python -c 'from pathlib import Path; compile(Path("conformance/m20/python/profile.py").read_text(), "profile.py", "exec")'
       - name: Stop gateway
         if: always()
         shell: bash
@@ -194,9 +200,57 @@ jobs:
           if [[ -f /tmp/qcli-m19-server.pid ]]; then kill "$(cat /tmp/qcli-m19-server.pid)" || true; fi
           cat /tmp/qcli-m19-server.log || true
 
+  release-gates:
+    name: Load, security, and HA release gates
+    needs: validate
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: qcli_test
+          POSTGRES_DB: qcli_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d qcli_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p qcli-cluster postgres_coordination_profile --locked -- --ignored
+        env:
+          QCLI_TEST_POSTGRES_URL: postgresql://postgres:qcli_test@127.0.0.1:5432/qcli_test
+      - run: cargo test --release -p qcli-core million_rows_stream_in_bounded_batches_to_csv_and_jsonl --locked -- --ignored
+      - run: cargo test -p qcli-http -p qcli-flight-sql -p qcli-service --locked
+
+  container:
+    name: Build OCI server image
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - name: Build and smoke image
+        run: |
+          docker build --tag qcli:${{ needs.validate.outputs.version }} .
+          docker run --rm qcli:${{ needs.validate.outputs.version }} --version
+      - name: Export OCI image archive
+        run: |
+          mkdir -p dist
+          docker save qcli:${{ needs.validate.outputs.version }} | gzip -9 > dist/qcli-${{ needs.validate.outputs.version }}-linux-amd64.oci.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qcli-container
+          path: dist/*
+          if-no-files-found: error
+
   publish-github:
     name: Sign and publish GitHub release
-    needs: [validate, build, connectivity-conformance]
+    needs: [validate, build, container, connectivity-conformance, release-gates]
     runs-on: ubuntu-latest
     environment: github-release
     permissions:

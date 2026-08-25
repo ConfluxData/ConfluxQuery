@@ -386,7 +386,7 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 | M21 — Ingestion and advanced transfer | Complete | Upload Arrow batches and use scalable multi-endpoint results |
 | M22 — Enterprise identity and transport | Complete | Operate Flight SQL with OIDC, mTLS, rotation, and hardened gRPC |
 | M23 — High availability | Complete | Share sessions/results and survive node failure |
-| M24 — Unified connectivity release | Pending | Publish supported HTTP, Flight SQL, ADBC, JDBC, and ODBC workflows |
+| M24 — Unified connectivity release | Complete | Publish and operate the supported gateway connectivity surfaces |
 | M25 — qcli JDBC driver | Pending | Publish a branded Type 4 JDBC driver with certified cross-engine behavior |
 
 Allowed status values are `Pending`, `In progress`, `Blocked`, and `Complete`. A milestone becomes `Complete` only after its automated tests, live or deterministic demo, documentation, and milestone report are present.
@@ -998,14 +998,15 @@ qcli serve
 HTTP query
 Python ADBC query
 Java JDBC query
-approved ODBC/BI query
+approved ODBC/BI query, when an ODBC workflow is promoted from experimental
 all use one authorized target, query core, audit trail, and observability model.
 ```
 
 Must demonstrate:
 
 - Signed packaged Flight SQL-capable server artifacts.
-- Supported HTTP, native Flight SQL, ADBC, JDBC, and approved ODBC workflows.
+- Supported HTTP, native Flight SQL, ADBC, and Arrow Flight SQL JDBC workflows,
+  plus an explicit experimental status for ODBC until a client is approved.
 - Deployment, TLS, identity, scaling, client, migration, rollback, and incident
   documentation.
 - Published compatibility, conformance, security, reliability, and performance

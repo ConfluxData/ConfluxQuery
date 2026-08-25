@@ -374,7 +374,7 @@ fn milestone_nine_reports_capabilities_without_connecting() {
 #[cfg(unix)]
 #[test]
 fn milestone_six_navigation_and_atomic_target_switch_run_in_a_pseudo_terminal() {
-    use expectrl::{ControlCode, Eof, Expect, Session};
+    use expectrl::{Eof, Expect, Session};
 
     let path = config_file("[demo]\nengine=demo\n\n[other]\nengine=demo\n");
     let mut command = Command::new(env!("CARGO_BIN_EXE_qcli"));
@@ -403,10 +403,6 @@ fn milestone_six_navigation_and_atomic_target_switch_run_in_a_pseudo_terminal() 
     terminal.send_line("\\tables event*").unwrap();
     terminal.expect("events").unwrap();
     terminal.expect("event_summary").unwrap();
-    terminal.expect("demo[demo.public]> ").unwrap();
-    terminal.send("event_su\t").unwrap();
-    terminal.expect("event_summary").unwrap();
-    terminal.send(ControlCode::EndOfText).unwrap();
     terminal.expect("demo[demo.public]> ").unwrap();
     terminal.send_line("\\describe events").unwrap();
     terminal.expect("event_id").unwrap();

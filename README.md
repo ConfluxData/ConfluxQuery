@@ -110,6 +110,12 @@ qcli serve \
 Standalone mode remains the default. See the
 [high-availability guide](docs/high-availability.md).
 
+Production installation, Kubernetes/systemd deployment, TLS, scaling,
+upgrades, rollback, and incident response are covered by the
+[operations runbook](docs/operations.md). The exact released and experimental
+client surfaces are defined by the
+[unified connectivity contract](docs/unified-connectivity-release.md).
+
 or explicit `--flight-trusted-proxy`, in which case the trusted gRPC proxy must
 supply `x-forwarded-proto: https`. See the
 [Milestone 17 notes](docs/milestones/milestone-17-notes.md) for the protocol,
