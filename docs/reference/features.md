@@ -16,7 +16,7 @@
 | Clients | Python/Go/Java/Rust ADBC profiles | Supported named versions |
 | Clients | Upstream Arrow Flight SQL JDBC | Supported integration profile |
 | Clients | ODBC and BI | Experimental |
-| Clients | qcli-branded JDBC driver | Planned M25 |
+| Clients | ConfluxQuery JDBC Driver | Planned M25 |
 | SQL | Cross-dialect transpilation | Planned |
 
 The authoritative version/client matrix is

@@ -1,4 +1,4 @@
-# Interactive shell reference
+# ConfluxQuery CLI interactive shell
 
 Start with `qcli --target NAME`; omit the target to select interactively.
 Statements execute when a semicolon appears outside quotes. Multiline input,

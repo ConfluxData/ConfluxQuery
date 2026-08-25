@@ -2,13 +2,13 @@
 
 ## `target list` asks for an unrelated credential
 
-Current qcli target discovery does not expand target credentials. Confirm you
+Current ConfluxQuery CLI target discovery does not expand target credentials. Confirm you
 are running the expected binary with `qcli --version`. Use `config check` only
 when all referenced environment variables are intentionally available.
 
 ## A target always uses the original catalog/schema
 
-Run `\status` after `USE`, `\use-catalog`, or `\use-schema`. Prefer qcli's
+Run `\status` after `USE`, `\use-catalog`, or `\use-schema`. Prefer ConfluxQuery CLI's
 validated commands when the engine exposes metadata. Qualified namespace
 syntax differs: on Databricks, change catalog and schema separately if Unity
 Catalog rejects a nested schema.
@@ -16,14 +16,14 @@ Catalog rejects a nested schema.
 ## Databricks command reports missing `columns`
 
 Successful `USE` and other command statements can return no result columns.
-Modern qcli treats that as a successful command and applies reported context.
+ConfluxQuery treats that as a successful command and applies reported context.
 Upgrade if an older adapter attempts to deserialize every response as a rowset.
 
 ## Snowflake metadata works but rows are empty
 
-Verify the query through the current qcli release and inspect role, warehouse,
+Verify the query through the current ConfluxQuery release and inspect role, warehouse,
 database, schema, row visibility, and native response decoding. Earlier client
-paths could expose metadata while silently dropping decoded row data; qcli now
+paths could expose metadata while silently dropping decoded row data; ConfluxQuery now
 fails on that inconsistency rather than returning false success.
 
 ## HTTP returns 401

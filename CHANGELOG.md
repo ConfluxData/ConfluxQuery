@@ -20,6 +20,9 @@ All notable qcli changes are documented here. qcli follows semantic versioning.
 - A branded, searchable MkDocs product portal covering product rationale,
   architecture, every CLI/server surface, ecosystem examples, and how-to
   workflows, with strict CI builds and one-command GitHub Pages deployment.
+- ConfluxQuery umbrella branding by ConfluxData, with ConfluxQuery CLI and
+  ConfluxQuery Gateway as the two offerings while preserving `qcli` technical
+  contracts, plus an authoritative terminology directive and CI enforcement.
 
 ## [0.1.0] - Unreleased
 

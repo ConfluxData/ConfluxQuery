@@ -1,6 +1,7 @@
-# Server mode
+# ConfluxQuery Gateway
 
-`qcli serve` turns the same binary into a query gateway. HTTP and Flight SQL
+ConfluxQuery Gateway is a governed, Arrow-native query access layer for
+applications and data tools. Start it with `qcli serve`. HTTP and Flight SQL
 share one runtime, so identity, target authorization, sessions, queries,
 results, cancellation, quotas, audit, and cluster state behave consistently.
 
@@ -69,7 +70,8 @@ valid across load balancing.
 - `GET /health/ready` returns 204 until draining starts, then 503.
 
 Both are intentionally unauthenticated and disclose no configuration. On
-SIGTERM qcli withdraws readiness, drains listeners, stops admitting work, and
+SIGTERM causes ConfluxQuery Gateway to withdraw readiness, drain listeners,
+stop admitting work, and
 allows in-flight cleanup within the deployment grace period.
 
 ## Resource controls

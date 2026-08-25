@@ -11,3 +11,4 @@ python3 scripts/check-cli-docs.py \
   crates/qcli-config/src/lib.rs \
   crates/qcli-repl/src/lib.rs
 python3 -m py_compile conformance/m24/http_profile.py conformance/m19/python/profile.py
+python3 scripts/check-branding.py

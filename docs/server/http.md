@@ -1,4 +1,4 @@
-# HTTP API workflows
+# ConfluxQuery Gateway HTTP API
 
 Swagger UI at `/docs/` is the interactive reference; `/openapi.json` is the
 machine contract. This page explains resource workflows.

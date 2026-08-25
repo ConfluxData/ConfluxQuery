@@ -44,7 +44,7 @@ Arrow IPC objects are shared through the configured object store.
 
 ## Cancellation
 
-Cancellation is cooperative and adapter-capability dependent. qcli publishes a
+Cancellation is cooperative and adapter-capability dependent. ConfluxQuery publishes a
 cancellation request, reports progress through query events, and only claims
 confirmed engine cancellation when the adapter can establish it. Inspect
 `target capabilities` before building an operational guarantee around cancel.

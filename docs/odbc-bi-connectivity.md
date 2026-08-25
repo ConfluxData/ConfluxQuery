@@ -2,7 +2,8 @@
 
 ## Current status
 
-qcli's ODBC path is **Experimental**. It is not yet a supported product claim.
+ConfluxQuery's ODBC path is **Experimental**. It is not yet a supported product
+claim.
 The server exposes the standard Flight SQL operations needed by ODBC clients,
 and `conformance/m20` provides a reusable certification profile, but the
 selected upstream driver still has release and cancellation gaps.

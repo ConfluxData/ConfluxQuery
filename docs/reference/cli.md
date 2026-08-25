@@ -1,4 +1,6 @@
-# Complete CLI command reference
+# ConfluxQuery CLI command reference
+
+ConfluxQuery CLI is installed and invoked as `qcli`.
 
 ```text
 qcli [--config PATH] [--target TARGET]

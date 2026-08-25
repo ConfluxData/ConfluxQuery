@@ -1,10 +1,15 @@
 <div class="hero" markdown>
 
-# One query experience. Every cloud warehouse.
+# ConfluxQuery
 
-qcli is a Rust query client and gateway for Trino, Databricks SQL, and
-Snowflake. Use it interactively in a terminal, automate exact machine output,
-or expose governed HTTP and Arrow Flight SQL connectivity to an organization.
+## Query anywhere. Govern access once.
+
+ConfluxQuery is an open-source query toolset by
+[ConfluxData](https://confluxdata.in/). Use ConfluxQuery CLI to query Trino,
+Databricks SQL, and Snowflake from the terminal, or deploy ConfluxQuery Gateway
+to connect applications through HTTP, Arrow Flight SQL, ADBC, and JDBC.
+
+ConfluxQuery is distributed as the `qcli` command.
 
 [Start with the CLI](getting-started/cli-quickstart.md){ .md-button .md-button--primary }
 [Deploy the gateway](getting-started/server-quickstart.md){ .md-button }
@@ -14,19 +19,19 @@ or expose governed HTTP and Arrow Flight SQL connectivity to an organization.
 !!! info "Release boundary"
     HTTP, native Flight SQL, Python/Go/Java/Rust ADBC profiles, and the upstream
     Arrow Flight SQL JDBC integration are released surfaces. ODBC remains
-    experimental; the branded qcli JDBC driver is planned for M25.
+    experimental; the branded ConfluxQuery JDBC Driver is planned for M25.
 
 <div class="grid cards" markdown>
 
--   :material-console: **A capable terminal**
+-   :material-console: **ConfluxQuery CLI**
 
-    Discover targets, browse metadata, change context, stream queries, cancel
-    work, and emit exact CSV, TSV, JSON, JSONL, table, or vertical output.
+    One consistent interactive and automated query experience across Trino,
+    Databricks SQL, and Snowflake.
 
--   :material-server-network: **A reusable query gateway**
+-   :material-server-network: **ConfluxQuery Gateway**
 
-    One shared query runtime powers HTTP and Flight SQL with sessions,
-    prepared statements, Arrow results, authentication, quotas, and audit.
+    A governed, Arrow-native query access layer for applications and data
+    tools, powered by the same query runtime as the CLI.
 
 -   :material-shield-lock: **Designed for enterprise boundaries**
 
@@ -45,9 +50,9 @@ or expose governed HTTP and Arrow Flight SQL connectivity to an organization.
 
 | Goal | Start here |
 |---|---|
-| Install and run a first query | [CLI quickstart](getting-started/cli-quickstart.md) |
+| Install and run a first query | [ConfluxQuery CLI quickstart](getting-started/cli-quickstart.md) |
 | Configure Trino, Databricks, or Snowflake | [Engine setup](guides/engines.md) |
-| Start HTTP and Swagger | [Gateway quickstart](getting-started/server-quickstart.md) |
+| Start HTTP and Swagger | [ConfluxQuery Gateway quickstart](getting-started/server-quickstart.md) |
 | Connect an application | [Client ecosystem](server/clients.md) |
 | Understand the design | [Architecture](concepts/architecture.md) |
 | Deploy and operate production | [Operations](operations.md) |

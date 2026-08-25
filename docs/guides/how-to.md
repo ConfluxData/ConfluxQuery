@@ -62,7 +62,7 @@ qcli serve --auth-file auth.toml \
   --cors-origin https://analytics.example.com
 ```
 
-List every exact allowed origin separately. Put qcli behind the documented TLS
+List every exact allowed origin separately. Put ConfluxQuery Gateway behind the documented TLS
 proxy before non-loopback access.
 
 ## Enable OIDC

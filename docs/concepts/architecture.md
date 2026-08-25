@@ -1,8 +1,8 @@
 # Architecture
 
-qcli is one product with three protocol-facing interfaces and one query core.
-The terminal is not launched by the server, and Flight SQL is not translated
-through HTTP.
+ConfluxQuery is one umbrella product with ConfluxQuery CLI and ConfluxQuery
+Gateway sharing one query core. The terminal is not launched by the Gateway,
+and Flight SQL is not translated through HTTP.
 
 ```mermaid
 flowchart LR

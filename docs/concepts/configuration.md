@@ -1,7 +1,7 @@
 # Configuration and targets
 
-The default path is `~/.qcli/.env`. The file belongs to qcli and uses INI-like
-sections; it is not a flat dotenv file.
+The default path is `~/.qcli/.env`. The file belongs to ConfluxQuery and uses
+INI-like sections; it is not a flat dotenv file.
 
 ```ini
 [default]
@@ -45,7 +45,7 @@ requiring every target's credentials.
 
 ## Permissions
 
-If a configuration contains secrets, qcli rejects overly broad Unix file
+If a configuration contains secrets, ConfluxQuery rejects overly broad Unix file
 permissions. Prefer environment references and mode `0600`:
 
 ```bash

@@ -44,10 +44,10 @@ to stderr so stdout remains parseable. Broken downstream pipes are success.
 - Do not pass tokens as command-line arguments.
 - Disable history or use non-interactive mode for sensitive SQL.
 - Capture stderr in an access-controlled log because it contains target and
-  query diagnostics, though qcli redacts configured secrets.
+  query diagnostics, though ConfluxQuery redacts configured secrets.
 
 ## Stable jobs
 
-Pin a qcli release and target configuration, specify an explicit machine
+Pin a ConfluxQuery release and target configuration, specify an explicit machine
 format, set query/connect timeouts, and test `target capabilities` during
 deployment. Do not parse table borders or prompts.

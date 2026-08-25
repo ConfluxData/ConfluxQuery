@@ -1,4 +1,7 @@
-# Install qcli
+# Install ConfluxQuery
+
+ConfluxQuery CLI and ConfluxQuery Gateway are distributed through the same
+`qcli` executable.
 
 ## Release archive
 

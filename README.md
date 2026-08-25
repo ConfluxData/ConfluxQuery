@@ -1,6 +1,17 @@
-# qcli
+# ConfluxQuery
 
-qcli is one query shell for cloud data platforms. Initial engine targets are Trino, Databricks SQL, and Snowflake.
+**Query anywhere. Govern access once.**
+
+ConfluxQuery is an open-source query toolset by
+[ConfluxData](https://confluxdata.in/). ConfluxQuery CLI provides one terminal
+and automation workflow for Trino, Databricks SQL, and Snowflake. ConfluxQuery
+Gateway provides governed HTTP, Arrow Flight SQL, ADBC, and JDBC access through
+the same query core.
+
+ConfluxQuery is distributed as the `qcli` command. Start ConfluxQuery CLI with
+`qcli --target TARGET`; start ConfluxQuery Gateway with `qcli serve`. Technical
+contracts such as `~/.qcli/`, `QCLI_*`, API routes, package names, and prompts
+remain unchanged.
 
 The product manual is built with MkDocs Material:
 
@@ -15,6 +26,7 @@ site to GitHub Pages with the single command `make docs-deploy` (equivalent to
 
 Architecture and delivery documentation:
 
+- [Brand and terminology directives](docs/brand-directives.md)
 - [Product design](docs/product-design.md)
 - [Feature roadmap](docs/features-roadmap.md)
 - [Execution plan and demonstrable milestones](docs/execution-plan.md)
@@ -31,7 +43,7 @@ Inspect an engine's normalized capabilities without connecting:
 qcli target capabilities TARGET
 ```
 
-Start the loopback-only HTTP preview:
+Start the loopback-only ConfluxQuery Gateway preview:
 
 ```text
 qcli serve
@@ -164,7 +176,9 @@ cargo run -- --config /tmp/qcli-milestone-1.env target list
 cargo run -- --config /tmp/qcli-milestone-1.env target show trino-dev
 ```
 
-The normal configuration location is `~/.qcli/.env`. Despite its filename, it is a qcli-owned sectioned format. `[default]` contains shared properties and every other section defines a target.
+The normal configuration location is `~/.qcli/.env`. Despite its filename, it
+is a ConfluxQuery-owned sectioned format. `[default]` contains shared properties
+and every other section defines a target.
 
 ## Milestone 2 demo
 

@@ -1,8 +1,9 @@
 # Arrow Flight SQL
 
-Flight SQL is qcli's high-performance, language-neutral application data
-plane. It carries Arrow schemas and record batches without JSON conversion and
-allows standard ADBC and JDBC clients to reuse the same gateway.
+Flight SQL is ConfluxQuery Gateway's high-performance, language-neutral
+application data plane. It carries Arrow schemas and record batches without
+JSON conversion and allows standard ADBC and JDBC clients to reuse the same
+Gateway.
 
 ## Connect and select a target
 
@@ -49,8 +50,8 @@ transport metadata. Do not use a generic HTTP/1 proxy.
 
 Flight SQL supplies a uniform metadata wire schema, but catalog hierarchy is
 engine-specific. Trino commonly uses catalog/schema; Databricks uses Unity
-Catalog catalog/schema; Snowflake uses database/schema. qcli maps these through
-the adapter and preserves native names/types where possible.
+Catalog catalog/schema; Snowflake uses database/schema. ConfluxQuery maps these
+through the adapter and preserves native names/types where possible.
 
 ## Ingestion
 

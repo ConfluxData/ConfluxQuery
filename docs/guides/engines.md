@@ -30,9 +30,9 @@ catalog = hive
 schema = analytics
 ```
 
-Use `token=${TRINO_TOKEN}` for bearer auth. qcli rejects credentials over plain
+Use `token=${TRINO_TOKEN}` for bearer auth. ConfluxQuery rejects credentials over plain
 HTTP. Enterprise IdP support depends on whether the target accepts a bearer
-token qcli can obtain/provide; browser-interactive engine login is not implied
+token ConfluxQuery can obtain/provide; browser-interactive engine login is not implied
 by gateway OIDC caller authentication.
 
 Trino `USE catalog.schema` updates tracked context when the server reports the
@@ -67,7 +67,7 @@ USE SCHEMA tpch_1;
 ```
 
 `USE SCHEMA hive_metastore.tpch_1` can be rejected by Unity Catalog as a nested
-namespace. qcli preserves this backend error; it does not rewrite namespace
+namespace. ConfluxQuery preserves this backend error; it does not rewrite namespace
 semantics.
 
 ## Snowflake username/password
@@ -93,9 +93,9 @@ qcli --target snowflake-dev --command \
   'select * from SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.NATION limit 10'
 ```
 
-Only authentication modes implemented by the qcli adapter/client combination
+Only authentication modes implemented by the ConfluxQuery adapter/client combination
 are supported. A value accepted by Snowflake as a password-compatible token can
-occupy the `password` field, but qcli does not transform a PAT into another
+occupy the `password` field, but ConfluxQuery does not transform a PAT into another
 authentication flow. TOTP/MFA and browser SSO require explicit provider/client
 support and must not be assumed.
 

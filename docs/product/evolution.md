@@ -1,12 +1,12 @@
 # Product evolution
 
-qcli evolved by extracting reusable product boundaries before adding new
+ConfluxQuery evolved by extracting reusable product boundaries before adding new
 protocols. This sequence matters: the gateway is not an HTTP wrapper around a
 terminal process.
 
 ```mermaid
 timeline
-    title qcli evolution
+    title ConfluxQuery evolution
     M1–M3 : Sectioned configuration
            : Shared Arrow query core
            : Exact batch output

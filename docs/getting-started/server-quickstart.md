@@ -1,4 +1,6 @@
-# Gateway quickstart
+# ConfluxQuery Gateway quickstart
+
+ConfluxQuery Gateway is started with `qcli serve`.
 
 ## 1. Start a local preview
 

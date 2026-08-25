@@ -83,7 +83,7 @@ may use HTTP without password/token.
 | `warehouse` | Compute warehouse. |
 | `database`, `schema`, `role` | Initial context and role. |
 
-Authentication support depends on the selected Rust client and qcli adapter.
+Authentication support depends on the selected Rust client and ConfluxQuery adapter.
 Do not assume every Snowflake authentication method is implemented merely
 because Snowflake supports it.
 

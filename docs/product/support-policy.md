@@ -1,7 +1,8 @@
 # Support policy
 
 Protocol compatibility is not the same as a supported product integration.
-qcli labels every surface as **supported**, **experimental**, or **planned**.
+ConfluxQuery labels every surface as **supported**, **experimental**, or
+**planned**.
 
 ## Supported
 
@@ -33,13 +34,13 @@ alone never promotes a client to supported status.
 
 ## Planned
 
-Planned features are design intent, not usable behavior. The qcli-branded JDBC
-driver and automatic SQL dialect transpilation are examples. They are kept out
+Planned features are design intent, not usable behavior. The branded
+ConfluxQuery JDBC Driver and automatic SQL dialect transpilation are examples. They are kept out
 of quickstarts and production runbooks until their milestone gates pass.
 
 ## Backend differences
 
-qcli standardizes workflow and data transport; it does not erase backend
+ConfluxQuery standardizes workflow and data transport; it does not erase backend
 semantics. SQL grammar, identifiers, data types, catalog hierarchy,
 authentication availability, cancellation guarantees, and command responses
 can differ. Consult [engine setup](../guides/engines.md) and inspect a target:

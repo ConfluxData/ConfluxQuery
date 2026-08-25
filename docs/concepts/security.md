@@ -1,7 +1,7 @@
 # Security and identity
 
-qcli separates **caller identity** from **warehouse credentials**. A client
-authenticates to the gateway; the selected target's server-side credential
+ConfluxQuery Gateway separates **caller identity** from **warehouse
+credentials**. A client authenticates to the Gateway; the selected target's server-side credential
 provider authenticates to Trino, Databricks, or Snowflake.
 
 ## Caller authentication
@@ -20,7 +20,7 @@ and OIDC can coexist during migration.
 ### mTLS
 
 Flight SQL can require a client CA. Verified certificate identity participates
-in principal/resource ownership; TLS termination must remain direct when qcli
+in principal/resource ownership; TLS termination must remain direct when ConfluxQuery Gateway
 is responsible for mTLS.
 
 ## Authorization
@@ -43,7 +43,7 @@ across cluster nodes.
 | Flight SQL | Requires authentication | Requires direct TLS or `--flight-trusted-proxy` |
 | Flight mTLS | Direct TLS | Direct TLS with client CA |
 
-Trusted-proxy mode is an explicit deployment trust decision. qcli rejects
+Trusted-proxy mode is an explicit deployment trust decision. ConfluxQuery Gateway rejects
 missing or non-HTTPS forwarded transport rather than guessing.
 
 ## Secrets

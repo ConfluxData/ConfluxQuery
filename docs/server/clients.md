@@ -1,4 +1,4 @@
-# Client ecosystem
+# ConfluxQuery Gateway client ecosystem
 
 The examples assume a gateway at `127.0.0.1:32010`, a bearer token in
 `QCLI_FLIGHT_TOKEN`, and target `demo`. Replace `grpc://` with the TLS URI form
@@ -57,7 +57,7 @@ The repository conformance profile also checks `GetObjects` metadata.
 
 !!! warning
     This is the upstream Arrow Flight SQL JDBC integration, not the planned
-    qcli-branded M25 driver.
+    branded ConfluxQuery M25 driver.
 
 ```java
 String url = "jdbc:arrow-flight-sql://127.0.0.1:32010/?useEncryption=false";
@@ -101,7 +101,7 @@ println!("query id: {}", query["id"]);
 ```
 
 The repository's Rust ADBC profile exercises the ADBC C driver manager against
-qcli Flight SQL.
+ConfluxQuery Gateway Flight SQL.
 
 ## JavaScript / TypeScript HTTP
 

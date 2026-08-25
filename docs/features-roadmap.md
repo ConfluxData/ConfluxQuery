@@ -1,4 +1,4 @@
-# qcli Feature Roadmap
+# ConfluxQuery Feature Roadmap
 
 Status: Product direction
 
@@ -10,7 +10,7 @@ Related documents:
 
 ## 1. Product direction
 
-qcli is a governed, Arrow-native query gateway for analytical platforms, with a
+ConfluxQuery Gateway is a governed, Arrow-native query gateway for analytical platforms, with a
 first-class terminal client. It provides one access layer for Trino, Databricks
 SQL, and Snowflake through:
 
@@ -19,7 +19,7 @@ SQL, and Snowflake through:
 - Flight SQL for Arrow-native remote SQL access.
 - Standard ADBC and JDBC clients, plus explicitly certified ODBC clients.
 
-qcli owns connectivity, identity, policy, routing, query lifecycle, metadata,
+ConfluxQuery owns connectivity, identity, policy, routing, query lifecycle, metadata,
 observability, and result delivery. The selected warehouse continues to own SQL
 execution, optimization, storage, and engine-native transaction semantics.
 
@@ -31,7 +31,7 @@ order and completion status remain in the
 
 ## 2. Product forms
 
-qcli has two product forms built from the same core:
+ConfluxQuery has two offerings built from the same core:
 
 ### 2.1 Terminal client
 
@@ -518,7 +518,7 @@ security, correctness, and conformance gates.
 
 The intended long-term positioning is:
 
-> qcli is a governed, dialect-aware, Arrow-native query gateway that lets
+> ConfluxQuery is a governed, dialect-aware, Arrow-native query platform that lets
 > applications and people use one interface across analytical warehouses.
 
 Its strongest combined promises are:

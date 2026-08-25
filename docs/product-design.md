@@ -1,4 +1,4 @@
-# qcli Product and Technical Design
+# ConfluxQuery Product and Technical Design
 
 Status: Proposed
 
@@ -10,28 +10,35 @@ Implementation language: Rust
 
 Primary configuration: `~/.qcli/.env`
 
+Brand authority: [ConfluxQuery Brand and Terminology Directives](brand-directives.md)
+
 ## 1. Executive summary
 
-qcli is an interactive and automation-friendly command-line query client for cloud data platforms. It provides one consistent workflow for selecting a configured target, discovering data, executing SQL, inspecting query progress, and exporting results across Trino, Databricks SQL, and Snowflake.
+ConfluxQuery is an open-source query toolset by ConfluxData. ConfluxQuery CLI
+provides an interactive and automation-friendly terminal workflow for selecting
+a target, discovering data, executing SQL, inspecting progress, and exporting
+results across Trino, Databricks SQL, and Snowflake.
 
-The same execution core is exposed through `qcli serve`. HTTP is the operational
-control plane and Arrow Flight SQL is the standard remote SQL and Arrow data
-plane. Terminal, HTTP, and Flight SQL clients share the same authentication,
+ConfluxQuery Gateway exposes the same execution core through `qcli serve`.
+HTTP is the operational control plane and Arrow Flight SQL is the standard
+remote SQL and Arrow data plane. Terminal, HTTP, and Flight SQL clients share the same authentication,
 authorization, session, adapter, query lifecycle, cancellation, metadata,
 quota, audit, and result abstractions; neither service frontend may shell out to
-the qcli executable.
+the `qcli` executable.
 
-qcli is not designed around PostgreSQL compatibility. Its common model is the model shared by analytical query platforms:
+ConfluxQuery is not designed around PostgreSQL compatibility. Its common model is the model shared by analytical query platforms:
 
 ```text
 target -> compute -> catalog -> schema -> object
 ```
 
-Not every engine exposes every level. qcli presents the concepts that are meaningful for the active target and hides or marks unsupported concepts rather than inventing behavior.
+Not every engine exposes every level. ConfluxQuery presents the concepts that
+are meaningful for the active target and hides or marks unsupported concepts
+rather than inventing behavior.
 
 The first release deliberately excludes transaction management. It concentrates on the workflow that matters most for analytical querying:
 
-1. Start qcli.
+1. Start ConfluxQuery CLI with `qcli`.
 2. Pick a target defined in `~/.qcli/.env`.
 3. Inspect or change catalog, schema, compute, and session properties.
 4. Enter and execute SQL.
@@ -41,13 +48,18 @@ The first release deliberately excludes transaction management. It concentrates 
 
 ## 2. Product identity
 
-The product and executable are named `qcli`.
+The umbrella product is **ConfluxQuery**, published by **ConfluxData**. Its two
+offerings are **ConfluxQuery CLI** and **ConfluxQuery Gateway**. Both are
+distributed through the stable `qcli` executable.
 
-Suggested description:
+Primary message:
 
-> qcli — one query shell for cloud data platforms.
+> Query anywhere. Govern access once.
 
-The name means “query command-line interface.” It avoids implying that qcli is a database, SQL dialect, or PostgreSQL clone. It also leaves room for additional query engines in the future.
+The executable name means “query command-line interface.” It remains the
+technical name for commands, packages, configuration, environment variables,
+APIs, and identifiers. Product-facing prose follows the
+[brand directives](brand-directives.md).
 
 ## 3. Goals
 
@@ -101,7 +113,8 @@ The name means “query command-line interface.” It avoids implying that qcli 
 - Predicting query cost before execution.
 - Acting as a security boundary. Database permissions remain authoritative.
 
-qcli may execute DDL and DML accepted by an engine. Not being transaction-aware does not mean qcli is read-only.
+ConfluxQuery may execute DDL and DML accepted by an engine. Not being
+transaction-aware does not mean ConfluxQuery is read-only.
 
 ## 5. Users and use cases
 
@@ -1694,8 +1707,10 @@ Analytical users can accidentally request enormous datasets. Streaming, paging, 
 
 ## 25. Product decisions already made
 
-- The name is `qcli`.
-- qcli is warehouse-oriented, not PostgreSQL-oriented.
+- The umbrella product is ConfluxQuery by ConfluxData; its offerings are
+  ConfluxQuery CLI and ConfluxQuery Gateway.
+- The stable executable and technical identifier is `qcli`.
+- ConfluxQuery is warehouse-oriented, not PostgreSQL-oriented.
 - Initial engines are Trino, Databricks SQL, and Snowflake.
 - Configuration lives at `~/.qcli/.env`.
 - `[default]` contains shared properties.

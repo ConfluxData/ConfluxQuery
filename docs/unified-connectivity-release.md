@@ -1,6 +1,7 @@
 # Unified Connectivity Release Contract
 
-M24 publishes one qcli server artifact whose HTTP and Flight SQL frontends use
+M24 publishes one ConfluxQuery Gateway artifact through the `qcli` binary. Its
+HTTP and Flight SQL frontends use
 the same target configuration, authenticated principal, session/query service,
 authorization, quotas, audit events, retention, and optional cluster state.
 
@@ -14,7 +15,7 @@ authorization, quotas, audit events, retention, and optional cluster state.
 | Python/Go/Java/Rust ADBC | Supported at pinned versions | Clean-client M19 profiles |
 | Apache Arrow Flight SQL JDBC | Demo adapter supported | Clean Java JDBC profile |
 | Apache Arrow Flight SQL ODBC | Experimental | Source-profile integrity only; no end-user package |
-| qcli-branded JDBC | Not yet released | M25 |
+| ConfluxQuery JDBC Driver | Not yet released | M25 |
 
 No ODBC/BI client is advertised as approved in M24. This preserves the M20
 decision to keep ODBC experimental until an installable upstream package,

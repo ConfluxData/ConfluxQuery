@@ -1,10 +1,10 @@
-site_name: qcli
-site_description: One query CLI and gateway for Trino, Databricks SQL, and Snowflake
+site_name: ConfluxQuery
+site_description: ConfluxQuery CLI and Gateway for Trino, Databricks SQL, and Snowflake
 site_url: https://deepakdixit.github.io/qcli/
 repo_url: https://github.com/deepakdixit/qcli
 repo_name: deepakdixit/qcli
 edit_uri: edit/main/docs/
-copyright: Copyright &copy; qcli contributors
+copyright: ConfluxQuery by ConfluxData &middot; Copyright &copy; contributors
 
 theme:
   name: material
@@ -81,13 +81,13 @@ not_in_nav: |
 nav:
   - Home: index.md
   - Product:
-      - Why qcli: product/why-qcli.md
+      - Why ConfluxQuery: product/why-qcli.md
       - Evolution: product/evolution.md
       - Support policy: product/support-policy.md
   - Get started:
       - Install: getting-started/install.md
-      - CLI quickstart: getting-started/cli-quickstart.md
-      - Gateway quickstart: getting-started/server-quickstart.md
+      - ConfluxQuery CLI quickstart: getting-started/cli-quickstart.md
+      - ConfluxQuery Gateway quickstart: getting-started/server-quickstart.md
   - Concepts:
       - Architecture: concepts/architecture.md
       - Configuration and targets: concepts/configuration.md
@@ -95,14 +95,14 @@ nav:
       - Security and identity: concepts/security.md
       - High availability: high-availability.md
       - Ingestion and transfer: ingestion-and-advanced-transfer.md
-  - CLI:
+  - ConfluxQuery CLI:
       - Complete command reference: reference/cli.md
       - Interactive shell: reference/repl.md
       - Configuration properties: reference/configuration.md
       - Output and automation: guides/cli-automation.md
       - Engine setup: guides/engines.md
-  - Gateway:
-      - Server mode: server/index.md
+  - ConfluxQuery Gateway:
+      - Gateway overview: server/index.md
       - HTTP API workflows: server/http.md
       - Flight SQL: server/flight-sql.md
       - Client ecosystem: server/clients.md
@@ -116,6 +116,7 @@ nav:
       - Compatibility: connectivity-compatibility.md
       - Supported platforms: supported-platforms.md
       - Feature status: reference/features.md
+      - Brand directives: brand-directives.md
       - Unified release contract: unified-connectivity-release.md
       - Experimental ODBC/BI: odbc-bi-connectivity.md
       - Product design record: product-design.md

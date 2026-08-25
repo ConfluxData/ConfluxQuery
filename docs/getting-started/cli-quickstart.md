@@ -1,9 +1,9 @@
-# CLI quickstart
+# ConfluxQuery CLI quickstart
 
 ## 1. Create the configuration
 
-qcli reads `~/.qcli/.env` by default. Despite the filename, this is a sectioned
-qcli configuration file. `[default]` contains shared behavior; every other
+The `qcli` command reads `~/.qcli/.env` by default. Despite the filename, this
+is a sectioned ConfluxQuery configuration file. `[default]` contains shared behavior; every other
 section is a selectable target.
 
 ```ini
@@ -68,8 +68,9 @@ trino-local[tpch.tiny]> select count(*) from nation;
 trino-local[tpch.tiny]> \q
 ```
 
-Without `--target`, qcli prompts when multiple targets exist. Target switches
-are atomic: qcli validates the destination before replacing the active session.
+Without `--target`, ConfluxQuery CLI prompts when multiple targets exist.
+Target switches are atomic: it validates the destination before replacing the
+active session.
 
 ## Next
 
