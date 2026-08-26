@@ -89,6 +89,30 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  jdbc-driver:
+    name: ConfluxQuery JDBC (JDK ${{ matrix.java }})
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ["17", "21"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+          cache-dependency-path: jdbc/pom.xml
+      - run: mvn -B -f jdbc/pom.xml clean verify
+      - name: Verify reproducible standalone JAR
+        shell: bash
+        run: |
+          first="$(sha256sum jdbc/target/confluxquery-jdbc-*-all.jar | cut -d' ' -f1)"
+          mvn -B -q -f jdbc/pom.xml clean package -DskipTests
+          second="$(sha256sum jdbc/target/confluxquery-jdbc-*-all.jar | cut -d' ' -f1)"
+          test "$first" = "$second"
+
   connectivity-conformance:
     name: ADBC and JDBC conformance
     runs-on: ubuntu-latest
@@ -112,8 +136,12 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
-          cache-dependency-path: conformance/m19/java/pom.xml
+          cache-dependency-path: |
+            jdbc/pom.xml
+            conformance/m19/java/pom.xml
+            conformance/m25/java/pom.xml
       - run: cargo build --release --locked -p qcli
+      - run: mvn -B -f jdbc/pom.xml install
       - name: Start packaged-equivalent demo gateway
         shell: bash
         run: |
@@ -151,6 +179,12 @@ jobs:
           MAVEN_OPTS: --add-opens=java.base/java.nio=ALL-UNNAMED
       - name: Arrow Flight SQL JDBC 19
         run: mvn -q -f conformance/m19/java/pom.xml exec:java -Dexec.mainClass=org.apache.qcli.JdbcProfile
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: demo
+          MAVEN_OPTS: --add-opens=java.base/java.nio=ALL-UNNAMED
+      - name: ConfluxQuery JDBC 0.1
+        run: mvn -B -q -f conformance/m25/java/pom.xml compile exec:java -Dexec.mainClass=in.confluxdata.query.jdbc.ConformanceProfile
         env:
           QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
           QCLI_FLIGHT_TARGET: demo

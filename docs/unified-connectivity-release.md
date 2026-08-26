@@ -15,7 +15,7 @@ authorization, quotas, audit events, retention, and optional cluster state.
 | Python/Go/Java/Rust ADBC | Supported at pinned versions | Clean-client M19 profiles |
 | Apache Arrow Flight SQL JDBC | Demo adapter supported | Clean Java JDBC profile |
 | Apache Arrow Flight SQL ODBC | Experimental | Source-profile integrity only; no end-user package |
-| ConfluxQuery JDBC Driver | Not yet released | M25 |
+| ConfluxQuery JDBC Driver | Supported named surface | M25 complete |
 
 No ODBC/BI client is advertised as approved in M24. This preserves the M20
 decision to keep ODBC experimental until an installable upstream package,

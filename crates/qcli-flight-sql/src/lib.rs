@@ -437,9 +437,20 @@ impl QcliFlightSql {
                 .await
                 .map_err(service_error_status)?
         } else {
-            let target = target.ok_or_else(|| {
-                Status::invalid_argument("qcli.target is required when creating a Flight session")
-            })?;
+            let target = target
+                .or_else(|| {
+                    request
+                        .metadata()
+                        .get("qcli-target")
+                        .and_then(|value| value.to_str().ok())
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                })
+                .ok_or_else(|| {
+                    Status::invalid_argument(
+                        "qcli.target option or qcli-target metadata is required when creating a Flight session",
+                    )
+                })?;
             self.gateway
                 .create_session_clustered(
                     &principal,
@@ -2828,6 +2839,17 @@ mod tests {
         bearer: &str,
         cookie: Option<&str>,
     ) -> Result<(Option<String>, Vec<u8>), Status> {
+        session_action_with_target(client, action_type, body, bearer, cookie, None).await
+    }
+
+    async fn session_action_with_target(
+        client: &mut FlightSqlServiceClient<Channel>,
+        action_type: &str,
+        body: Vec<u8>,
+        bearer: &str,
+        cookie: Option<&str>,
+        target: Option<&str>,
+    ) -> Result<(Option<String>, Vec<u8>), Status> {
         let mut request = Request::new(Action {
             r#type: action_type.into(),
             body: body.into(),
@@ -2840,6 +2862,12 @@ mod tests {
             request.metadata_mut().insert(
                 "cookie",
                 MetadataValue::from_str(cookie).expect("valid cookie"),
+            );
+        }
+        if let Some(target) = target {
+            request.metadata_mut().insert(
+                "qcli-target",
+                MetadataValue::from_str(target).expect("valid target"),
             );
         }
         let response = client.inner_mut().do_action(request).await?;
@@ -3086,6 +3114,32 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.code(), Code::NotFound);
+
+        let (header_cookie, body) = session_action_with_target(
+            &mut client,
+            SET_SESSION_OPTIONS,
+            SetSessionOptionsRequest {
+                session_options: HashMap::from([(
+                    "schema".into(),
+                    SessionOptionValue {
+                        option_value: Some(OptionValue::StringValue("jdbc".into())),
+                    },
+                )]),
+            }
+            .encode_to_vec(),
+            "valid-key",
+            None,
+            Some("demo"),
+        )
+        .await
+        .unwrap();
+        assert!(header_cookie.is_some());
+        assert!(
+            SetSessionOptionsResult::decode(body.as_slice())
+                .unwrap()
+                .errors
+                .is_empty()
+        );
 
         shutdown.send(()).unwrap();
         task.await.unwrap().unwrap();

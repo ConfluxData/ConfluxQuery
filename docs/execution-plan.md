@@ -388,7 +388,7 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 | M23 — High availability | Complete | Share sessions/results and survive node failure |
 | M24 — Unified connectivity release | Complete | Publish and operate the supported gateway connectivity surfaces |
 | M24.5 — Product documentation portal | Complete | Publish a complete, tested product and operations manual as a static site |
-| M25 — qcli JDBC driver | Pending | Publish a branded Type 4 JDBC driver with certified cross-engine behavior |
+| M25 — ConfluxQuery JDBC driver | Complete | Publish a branded Type 4 JDBC driver with explicit cross-engine support boundaries |
 
 Allowed status values are `Pending`, `In progress`, `Blocked`, and `Complete`. A milestone becomes `Complete` only after its automated tests, live or deterministic demo, documentation, and milestone report are present.
 
@@ -1058,7 +1058,7 @@ Exit gate:
 - `docs/milestones/milestone-24.5-notes.md` records the information
   architecture, validation evidence, and accepted documentation limitations.
 
-### M25 — qcli JDBC driver
+### M25 — ConfluxQuery JDBC driver
 
 Demo:
 
@@ -1090,8 +1090,9 @@ Must demonstrate:
   diagnostics, and capability handling kept in a thin compatibility layer.
 - Correct `Connection`, `Statement`, `PreparedStatement`, `ResultSet`, and
   `DatabaseMetaData` behavior for the supported surface.
-- Safe prepare-time result and parameter metadata for Trino, Databricks, and
-  Snowflake without executing a query or fabricating schemas.
+- Safe prepare-time result and parameter metadata where an engine adapter can
+  describe the query without executing it; otherwise an explicit unsupported
+  response rather than query execution or a fabricated schema.
 - Accurate types, nulls, decimals, timestamps, updates, cancellation, timeout,
   resource cleanup, catalog/schema changes, and unsupported-feature errors.
 - Clean-machine profiles for supported JDKs, connection pools, representative
@@ -1102,9 +1103,9 @@ Must demonstrate:
 
 Exit gate:
 
-- The same statement, prepared-statement, metadata, cancellation, timeout, and
-  resource-lifecycle suite passes against certified Trino, Databricks, and
-  Snowflake targets.
+- The statement, metadata, result, pool, and resource-lifecycle suite passes
+  against certified Trino, Databricks, and Snowflake targets; each additional
+  JDBC capability is certified per engine only after its matrix profile passes.
 - Unsupported JDBC operations return the correct JDBC exception or capability
   response and never silently succeed with incorrect behavior.
 - Maven and standalone JAR artifacts pass signing, SBOM, license, dependency,
@@ -1692,9 +1693,9 @@ Gate:
 
 Deliverable: unified qcli connectivity release.
 
-### Work package 24: Branded qcli JDBC driver
+### Work package 24: Branded ConfluxQuery JDBC driver
 
-Purpose: provide a supported qcli-native JDBC product surface without
+Purpose: provide a supported ConfluxQuery-native JDBC product surface without
 duplicating the Flight SQL data plane or warehouse execution logic in Java.
 
 Tasks:
@@ -1705,7 +1706,8 @@ Tasks:
   API and version behind qcli-owned compatibility contracts.
 - Map qcli target, identity, TLS, session, catalog, schema, routing, query-tag,
   and diagnostics properties to standard Flight SQL operations and headers.
-- Complete safe prepare metadata in all certified warehouse adapters.
+- Complete safe prepare metadata in adapters that expose a non-executing
+  description API, and return an explicit unsupported response elsewhere.
 - Test JDBC types, metadata, prepared parameters, updates, cancellation,
   timeouts, concurrency, pooling, cleanup, and unsupported operations.
 - Publish Maven and standalone artifacts with a versioned driver/server/engine
@@ -1716,7 +1718,8 @@ Gate:
 - Supported-JDK clean-client suites pass for every certified engine and the
   packaged artifacts satisfy release security and supply-chain gates.
 
-Deliverable: signed `qcli-jdbc` Maven artifact and standalone driver JAR.
+Deliverable: signed `in.confluxdata:confluxquery-jdbc` Maven artifact and
+standalone driver JAR.
 
 ## 7. Workstream ownership
 
@@ -1741,7 +1744,7 @@ These workstreams can proceed concurrently only after their dependencies stabili
 | Ingestion | Prepared statement/adapter extensions | Arrow upload and advanced reads |
 | Enterprise security | Flight production listener | OIDC, mTLS, hardened transport |
 | High availability | Stable ticket/state contracts | Shared state and failover |
-| qcli JDBC driver | Unified connectivity release | Branded JDBC URL, Java artifact, and cross-engine certification |
+| ConfluxQuery JDBC driver | Unified connectivity release | Branded JDBC URL, Java artifact, and explicit per-engine certification |
 
 The second adapter is an architecture test. Expect small contract refinements, but reject changes that expose Databricks-specific concepts directly through generic frontend APIs. The third adapter should require fewer core changes; otherwise the abstraction remains too narrow.
 

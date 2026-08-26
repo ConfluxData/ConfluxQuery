@@ -132,8 +132,8 @@ Messaging must describe current behavior accurately:
   implemented and released.
 - Do not call the product a “federated query engine.”
 - ODBC/BI remains experimental until named M20 integrations are certified.
-- The current JDBC integration uses the upstream Arrow Flight SQL JDBC client;
-  the branded ConfluxQuery JDBC Driver is planned for M25.
+- The branded ConfluxQuery JDBC Driver owns the stable `jdbc:qcli://` contract
+  and delegates its Flight SQL transport to Apache Arrow JDBC.
 
 Prefer:
 

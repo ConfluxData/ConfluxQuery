@@ -53,18 +53,13 @@ for reader.Next() { fmt.Println(reader.RecordBatch()) }
 
 The repository conformance profile also checks `GetObjects` metadata.
 
-## Java JDBC (upstream Arrow driver)
-
-!!! warning
-    This is the upstream Arrow Flight SQL JDBC integration, not the planned
-    branded ConfluxQuery M25 driver.
+## Java JDBC (ConfluxQuery driver)
 
 ```java
-String url = "jdbc:arrow-flight-sql://127.0.0.1:32010/?useEncryption=false";
+String url = "jdbc:qcli://127.0.0.1:32010/demo?tls=false";
 Properties properties = new Properties();
 properties.setProperty("token", System.getenv("QCLI_FLIGHT_TOKEN"));
-properties.setProperty("qcli-target", "demo");
-properties.setProperty("connectTimeout", "10000");
+properties.setProperty("connectTimeoutMs", "10000");
 
 try (Connection connection = DriverManager.getConnection(url, properties);
      PreparedStatement statement = connection.prepareStatement("select ?")) {
@@ -75,8 +70,9 @@ try (Connection connection = DriverManager.getConnection(url, properties);
 }
 ```
 
-`DatabaseMetaData` catalogs/tables and `Statement.cancel()` are covered by the
-release profile.
+`DatabaseMetaData`, preparation, updates, cancellation, HikariCP, and Spring
+JDBC are covered by the release profile. See the complete
+[JDBC guide](jdbc.md) for installation, TLS/mTLS, properties, and limitations.
 
 ## Java ADBC
 

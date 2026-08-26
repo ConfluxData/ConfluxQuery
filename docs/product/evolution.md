@@ -65,7 +65,8 @@ results, distributed quotas, draining, and node-independent signed tickets.
 
 - M20 remains an experimental ODBC/BI workstream until named clients are
   repeatably certified.
-- M25 plans a separately versioned, branded Type 4 JDBC driver.
+- M25 delivered the separately versioned, branded Type 4 ConfluxQuery JDBC
+  Driver and its `jdbc:qcli://` contract.
 - The feature roadmap includes query routing, policy, observability, result
   caching, and dialect-aware transpilation.
 

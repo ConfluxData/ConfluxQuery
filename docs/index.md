@@ -17,9 +17,9 @@ ConfluxQuery is distributed as the `qcli` command.
 </div>
 
 !!! info "Release boundary"
-    HTTP, native Flight SQL, Python/Go/Java/Rust ADBC profiles, and the upstream
-    Arrow Flight SQL JDBC integration are released surfaces. ODBC remains
-    experimental; the branded ConfluxQuery JDBC Driver is planned for M25.
+    HTTP, native Flight SQL, named ADBC profiles, and the branded ConfluxQuery
+    JDBC Driver are released surfaces. ODBC remains experimental. Consult the
+    compatibility matrix before choosing a client/engine combination.
 
 <div class="grid cards" markdown>
 

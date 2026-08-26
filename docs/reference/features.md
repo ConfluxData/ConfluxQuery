@@ -15,8 +15,8 @@
 | Operations | PostgreSQL/object-store cluster mode | Supported within documented topology |
 | Clients | Python/Go/Java/Rust ADBC profiles | Supported named versions |
 | Clients | Upstream Arrow Flight SQL JDBC | Supported integration profile |
+| Clients | ConfluxQuery JDBC Driver | Supported named surface |
 | Clients | ODBC and BI | Experimental |
-| Clients | ConfluxQuery JDBC Driver | Planned M25 |
 | SQL | Cross-dialect transpilation | Planned |
 
 The authoritative version/client matrix is

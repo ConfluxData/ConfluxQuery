@@ -23,6 +23,9 @@ All notable qcli changes are documented here. qcli follows semantic versioning.
 - ConfluxQuery umbrella branding by ConfluxData, with ConfluxQuery CLI and
   ConfluxQuery Gateway as the two offerings while preserving `qcli` technical
   contracts, plus an authoritative terminology directive and CI enforcement.
+- A branded Type 4 ConfluxQuery JDBC Driver with `jdbc:qcli://` target routing,
+  secure bearer/TLS properties, standalone and Maven artifacts, Java 17/21
+  gates, HikariCP/Spring conformance, SBOM generation, and guarded publication.
 
 ## [0.1.0] - Unreleased
 

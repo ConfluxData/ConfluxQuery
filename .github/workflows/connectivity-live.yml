@@ -50,8 +50,12 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
-          cache-dependency-path: conformance/m19/java/pom.xml
+          cache-dependency-path: |
+            jdbc/pom.xml
+            conformance/m19/java/pom.xml
+            conformance/m25/java/pom.xml
       - run: cargo build --release --locked -p qcli
+      - run: mvn -B -f jdbc/pom.xml install
       - name: Materialize protected live configuration
         shell: bash
         env:
@@ -103,6 +107,15 @@ jobs:
           QCLI_FLIGHT_TARGET: ${{ matrix.target }}
           QCLI_FLIGHT_QUERY: SELECT 1 AS qcli_m19_value
           QCLI_FLIGHT_EXPECTED_ROWS: "1"
+          MAVEN_OPTS: --add-opens=java.base/java.nio=ALL-UNNAMED
+      - name: ConfluxQuery JDBC
+        run: mvn -B -q -f conformance/m25/java/pom.xml compile exec:java -Dexec.mainClass=in.confluxdata.query.jdbc.ConformanceProfile
+        env:
+          QCLI_FLIGHT_TOKEN: ${{ secrets.QCLI_LIVE_TOKEN }}
+          QCLI_FLIGHT_TARGET: ${{ matrix.target }}
+          QCLI_FLIGHT_QUERY: SELECT 1 AS qcli_m25_value
+          QCLI_FLIGHT_EXPECTED_ROWS: "1"
+          QCLI_JDBC_EXTENDED: "false"
           MAVEN_OPTS: --add-opens=java.base/java.nio=ALL-UNNAMED
       - name: Rust ADBC C driver manager
         run: cargo run --locked --manifest-path conformance/m19/rust/Cargo.toml

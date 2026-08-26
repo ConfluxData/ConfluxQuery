@@ -13,6 +13,7 @@ profile. Newer versions are unverified until that pin is deliberately updated.
 | Java ADBC Flight SQL | 0.24.0 | Supported | Live profile | Live profile | Live profile |
 | Rust + ADBC C driver manager | 0.24.0 | Supported | Live profile | Live profile | Live profile |
 | Apache Arrow Flight SQL JDBC | 19.0.0 | Supported | Not yet supported | Not yet supported | Not yet supported |
+| ConfluxQuery JDBC Driver | 0.1.0, JDK 17/21 | Supported extended profile | Connection/query profile | Connection/query profile | Connection/query profile |
 | Apache Arrow Flight SQL ODBC | 25.0.0 source | Experimental | Not certified | Not certified | Not certified |
 
 `Supported` means the profile is a required pull-request and packaged-release
@@ -28,6 +29,16 @@ non-executing query-description operation. qcli does not execute a query during
 prepare, invent a schema, or rewrite it into a vendor-specific probe. Those
 three JDBC combinations remain unsupported until their adapters implement and
 pass that contract.
+
+The branded ConfluxQuery JDBC row adds the stable `jdbc:qcli://` URL, target
+routing, secure property model, branded metadata, service discovery, and
+packaging. Its extended demo profile covers statements, typed prepared
+parameters and prepare metadata, updates, cancellation, resource lifecycle,
+HikariCP, and Spring JDBC. The protected live profile certifies connection,
+metadata, ordinary query execution, result conversion, and pooling against all
+three engines. Prepared metadata, update, and cancellation support for a live
+engine remains uncertified until that adapter can pass the same extended
+profile; the branded wrapper does not remove the underlying limitation.
 
 ODBC is experimental. Apache Arrow 25 contains a Flight SQL ODBC implementation
 under Apache-2.0 but does not publish supported end-user packages, and the
@@ -100,6 +111,13 @@ the documented trust store. Java 9 and newer require:
 --add-opens=java.base/java.nio=ALL-UNNAMED
 ```
 
+### ConfluxQuery JDBC
+
+Use `jdbc:qcli://host:port/target`, put the raw Gateway API key in the `token`
+property (or an OIDC bearer value in `jwt`), and use `tls=false` only for local
+development. Full properties and Maven/standalone installation are in the
+[ConfluxQuery JDBC Driver guide](server/jdbc.md).
+
 ## Conformance coverage
 
 The credential-free profiles cover bearer rejection, target routing, query and
@@ -127,6 +145,8 @@ QCLI_FLIGHT_TOKEN=<key> python conformance/m19/python/profile.py
 QCLI_FLIGHT_TOKEN=<key> go run ./conformance/m19/go
 QCLI_FLIGHT_TOKEN=<key> mvn -q -f conformance/m19/java/pom.xml \
   exec:java -Dexec.mainClass=org.apache.qcli.JdbcProfile
+QCLI_FLIGHT_TOKEN=<key> mvn -q -f conformance/m25/java/pom.xml \
+  compile exec:java -Dexec.mainClass=in.confluxdata.query.jdbc.ConformanceProfile
 QCLI_FLIGHT_TOKEN=<key> cargo run --locked \
   --manifest-path conformance/m19/rust/Cargo.toml
 ```

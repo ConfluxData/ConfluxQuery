@@ -108,6 +108,7 @@ nav:
       - Gateway overview: server/index.md
       - HTTP API workflows: server/http.md
       - Flight SQL: server/flight-sql.md
+      - JDBC Driver: server/jdbc.md
       - Client ecosystem: server/clients.md
       - Deployment and operations: operations.md
       - Enterprise identity: enterprise-identity-and-transport.md

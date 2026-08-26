@@ -111,9 +111,43 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  jdbc:
+    name: Build ConfluxQuery JDBC artifacts
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: jdbc/pom.xml
+      - name: Build driver at release version
+        run: |
+          mvn -B -f jdbc/pom.xml versions:set -DnewVersion=${{ needs.validate.outputs.version }} -DgenerateBackupPoms=false
+          mvn -B -f jdbc/pom.xml clean verify
+      - name: Stage Maven and standalone artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp jdbc/pom.xml dist/confluxquery-jdbc-${{ needs.validate.outputs.version }}.pom
+          cp jdbc/target/confluxquery-jdbc-${{ needs.validate.outputs.version }}.jar dist/
+          cp jdbc/target/confluxquery-jdbc-${{ needs.validate.outputs.version }}-all.jar dist/
+          cp jdbc/target/confluxquery-jdbc-${{ needs.validate.outputs.version }}-sources.jar dist/
+          cp jdbc/target/confluxquery-jdbc-${{ needs.validate.outputs.version }}-javadoc.jar dist/
+          cp jdbc/target/confluxquery-jdbc-${{ needs.validate.outputs.version }}.cdx.json dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: confluxquery-jdbc
+          path: dist/*
+          if-no-files-found: error
+
   connectivity-conformance:
     name: Packaged ADBC and JDBC conformance
-    needs: [validate, build]
+    needs: [validate, build, jdbc]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -138,7 +172,14 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
-          cache-dependency-path: conformance/m19/java/pom.xml
+          cache-dependency-path: |
+            jdbc/pom.xml
+            conformance/m19/java/pom.xml
+            conformance/m25/java/pom.xml
+      - name: Install branded JDBC driver
+        run: |
+          mvn -B -f jdbc/pom.xml versions:set -DnewVersion=${{ needs.validate.outputs.version }} -DgenerateBackupPoms=false
+          mvn -B -f jdbc/pom.xml install
       - name: Start gateway from release archive
         shell: bash
         run: |
@@ -182,6 +223,12 @@ jobs:
           MAVEN_OPTS: --add-opens=java.base/java.nio=ALL-UNNAMED
       - name: Arrow Flight SQL JDBC 19
         run: mvn -q -f conformance/m19/java/pom.xml exec:java -Dexec.mainClass=org.apache.qcli.JdbcProfile
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: demo
+          MAVEN_OPTS: --add-opens=java.base/java.nio=ALL-UNNAMED
+      - name: ConfluxQuery JDBC
+        run: mvn -B -q -f conformance/m25/java/pom.xml -Dconfluxquery.jdbc.version=${{ needs.validate.outputs.version }} compile exec:java -Dexec.mainClass=in.confluxdata.query.jdbc.ConformanceProfile
         env:
           QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
           QCLI_FLIGHT_TARGET: demo
@@ -250,7 +297,7 @@ jobs:
 
   publish-github:
     name: Sign and publish GitHub release
-    needs: [validate, build, container, connectivity-conformance, release-gates]
+    needs: [validate, build, jdbc, container, connectivity-conformance, release-gates]
     runs-on: ubuntu-latest
     environment: github-release
     permissions:
@@ -267,7 +314,7 @@ jobs:
           merge-multiple: true
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum qcli-* > SHA256SUMS
+        run: sha256sum qcli-* confluxquery-jdbc-* > SHA256SUMS
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@v0
         with:
@@ -280,6 +327,7 @@ jobs:
           subject-path: |
             dist/qcli-*.tar.gz
             dist/qcli-*.zip
+            dist/confluxquery-jdbc-*.jar
       - uses: sigstore/cosign-installer@v3
       - name: Sign release files with GitHub OIDC
         working-directory: dist
