@@ -18,8 +18,8 @@
 | Clients | ConfluxQuery JDBC Driver | Supported named surface |
 | Clients | ODBC and BI | Experimental |
 | SQL | Dialect-aware read-only transpilation | Next — M26 |
-| Intelligence | Query passport and plan analysis | Planned post-M26 |
-| Governance | Cost and workload management | Planned post-M26 |
+| Intelligence | Query passport, eligibility, and plan analysis | Planned M27–M28 |
+| Governance | Intelligent routing, cost, and workload management | Planned M29 |
 | Agents | Governed MCP connectivity | Planned post-M26 |
 | Migration | Cross-engine semantic validation | Planned post-M26 |
 | Lakehouse | Metadata and pruning intelligence | Planned post-M26 |

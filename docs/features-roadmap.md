@@ -156,12 +156,26 @@ Operators need one view across all engines:
 - Authentication and authorization failures.
 - OpenTelemetry traces, metrics, structured logs, and audit events.
 
-### 4.6 Query intelligence and plan analysis
+### 4.6 Query intelligence, eligibility, and plan analysis
 
 ConfluxQuery should turn engine plans and profiles into portable operational
 evidence without pretending to replace each warehouse optimizer. A common
 analysis model can ingest Trino plans, Databricks query profiles, Snowflake
 query history/profile data, and the generated SQL from transpilation.
+
+Before execution, the model should produce an engine-neutral requirement
+profile: statement class, referenced logical datasets, functions and SQL
+features, estimated scan/result size, join and aggregation complexity, memory
+and data-movement risk, translation requirement/confidence, freshness need, and
+historical evidence for similar fingerprints. Matching that profile against
+target capabilities yields an eligibility report, not a routing side effect.
+
+```text
+Eligible: trino-small, databricks-production, snowflake-production
+Recommended by analysis: trino-small
+Confidence: medium
+Reason: certified read-only SQL; 3 GB estimated scan; data snapshot compatible
+```
 
 User-facing workflows should include:
 
@@ -177,6 +191,9 @@ unexpected data movement, spill, skew, excessive small files, stale statistics,
 and inefficient expressions introduced by translation. Every recommendation
 must link to the observed metric or plan node, identify engine applicability,
 state confidence, and avoid claiming guaranteed savings.
+
+M28 supplies eligibility and estimates. It never changes the selected target;
+M29 owns policy evaluation and the physical routing decision.
 
 ### 4.7 Lakehouse metadata intelligence
 
@@ -506,8 +523,25 @@ Logical targets may map to multiple physical targets:
 [analytics]
 type=route
 targets=trino-production,databricks-production,snowflake-production
-routing_policy=interactive_aware
+routing_policy=cost_aware
 ```
+
+A logical dataset registry is required before multiple engines are considered
+equivalent:
+
+```yaml
+datasets:
+  analytics.sales:
+    locations:
+      trino-small: iceberg.analytics.sales
+      databricks-production: main.analytics.sales
+      snowflake-production: ANALYTICS.PUBLIC.SALES
+```
+
+Each location carries a schema fingerprint, snapshot/freshness evidence, table
+format, statistics, region, classification, and authorization requirements.
+Matching relation names or SQL syntax alone is not proof that two targets hold
+equivalent data.
 
 Routing inputs may include:
 
@@ -519,10 +553,44 @@ Routing inputs may include:
 - Interactive or batch latency objective.
 - Estimated scan, compute, and egress cost.
 - Region and dataset availability.
+- Schema/snapshot compatibility and freshness.
+- Historical outcomes for the same normalized query fingerprint.
 
 The selected physical target and routing explanation are recorded in the query
 passport. Early routing should use explicit rules and metadata, not pretend to
 be a cross-engine cost-based SQL optimizer.
+
+Routing decisions use this fail-closed priority order:
+
+1. Caller authorization, object policy, residency, and governance.
+2. Dataset, schema, snapshot/freshness, and semantic equivalence.
+3. SQL/transpiler and target capability eligibility.
+4. Availability, resource fit, workload SLA, and queue constraints.
+5. Estimated and historical latency, scan, compute, egress, and monetary cost.
+
+Cost can choose only among targets that passed every preceding constraint. A
+cheap target returning stale or semantically different data is never eligible.
+
+Automatic routing should begin with certified read-only, deterministic queries
+over registered datasets. Writes, DDL, temporary objects, target-specific UDFs,
+session-dependent statements, uncertified translations, and unavailable or
+incomparable data require an explicit physical target.
+
+Rollout is progressive and reversible:
+
+1. **Advisory** reports eligibility and a recommendation; the caller selects.
+2. **Shadow** records the decision that would have been made while preserving
+   the explicitly selected target.
+3. **Guarded automatic** routes only a narrowly certified workload class and
+   uses deterministic fallback policy.
+4. **Adaptive** incorporates versioned historical passport evidence without
+   allowing an opaque learned model to override hard policy.
+5. **Validated** runs bounded, separately authorized equivalence sampling where
+   policy permits and records drift evidence.
+
+Every decision includes considered and rejected targets, ordered reason codes,
+input evidence versions, policy/ruleset version, confidence, selected target,
+fallback chain, and whether a human or client override was applied.
 
 ## 7. Governance and cost controls
 
@@ -609,8 +677,8 @@ they receive detailed demo and exit-gate contracts in the execution plan.
 | Candidate | Product outcome |
 |---|---|
 | M27 — Query Passport and Unified Observability | One durable operational record, timeline, metrics, audit context, and export format for every query |
-| M28 — Query Intelligence and Plan Analysis | Normalize engine plans/profiles and publish evidence-linked performance recommendations |
-| M29 — Cost Governance and Workload Management | Admission, workload classes, queues, budgets, attribution, approvals, and runaway-query controls |
+| M28 — Query Intelligence, Eligibility, and Plan Analysis | Build query requirement profiles, determine eligible engines, estimate resource/cost risk, and publish evidence-linked recommendations without routing |
+| M29 — Intelligent Routing, Cost Governance, and Workload Management | Add logical targets and dataset equivalence, then progress from advisory/shadow decisions to guarded automatic routing with queues, budgets, attribution, approvals, and controls |
 | M30 — Governed MCP and Agent Connectivity | Safely expose metadata and bounded read-only query tools to authenticated agents |
 | M31 — Cross-Engine Migration Validation | Validate transpiled workloads with bounded schema/result/performance/cost comparisons |
 | M32 — Lakehouse Metadata Intelligence | Correlate table layout, pruning, metadata health, query performance, and maintenance recommendations |
@@ -618,7 +686,9 @@ they receive detailed demo and exit-gate contracts in the execution plan.
 | M34 — Public Extension and Policy SDK | Add a versioned, isolated ecosystem boundary for adapters, policies, analyzers, stores, and enrichers |
 
 Cross-cutting work should be reused rather than postponed: M27 supplies the
-evidence model used by later milestones; M29 policy limits apply to M30 agents;
+evidence model used by later milestones; M28 supplies eligibility and estimates
+but never selects a target; M29 owns explainable physical selection and its
+policy limits also apply to M30 agents;
 M31 reuses M26 differential infrastructure; M32 may integrate the ConfluxData
 Lakehouse Cost Inspector; and M34 should package only contracts already proven
 by multiple built-in implementations.
