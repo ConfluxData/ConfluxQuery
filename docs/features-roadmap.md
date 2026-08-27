@@ -120,6 +120,10 @@ containing:
 - Cancellation and retry history.
 - Result retention and expiry.
 - Trace, policy, and audit references.
+- Transpiler latency, confidence, warnings, and source-to-generated mapping.
+- Normalized plan/profile summary and engine profile link.
+- Estimated and actual scan, compute, egress, and monetary cost when available.
+- Workload class, queue/admission decision, cost center, and approval reference.
 
 The passport is accessible through CLI and service APIs and becomes the common
 debugging language across all supported warehouses. SQL text and sensitive
@@ -151,6 +155,77 @@ Operators need one view across all engines:
 - Engine query links and normalized errors.
 - Authentication and authorization failures.
 - OpenTelemetry traces, metrics, structured logs, and audit events.
+
+### 4.6 Query intelligence and plan analysis
+
+ConfluxQuery should turn engine plans and profiles into portable operational
+evidence without pretending to replace each warehouse optimizer. A common
+analysis model can ingest Trino plans, Databricks query profiles, Snowflake
+query history/profile data, and the generated SQL from transpilation.
+
+User-facing workflows should include:
+
+```text
+qcli explain analyze --target snowflake-production --file report.sql
+qcli query inspect qcli_...
+qcli query recommendations qcli_...
+```
+
+Initial analysis should identify evidence-backed conditions such as ineffective
+partition or file pruning, unused projected columns, implicit join casts,
+unexpected data movement, spill, skew, excessive small files, stale statistics,
+and inefficient expressions introduced by translation. Every recommendation
+must link to the observed metric or plan node, identify engine applicability,
+state confidence, and avoid claiming guaranteed savings.
+
+### 4.7 Lakehouse metadata intelligence
+
+For targets backed by Delta Lake, Iceberg, or another supported table format,
+ConfluxQuery can correlate query behavior with table layout and metadata:
+
+- File count, size distribution, partition count, skew, and snapshot age.
+- Statistics freshness and metadata volume.
+- Query-to-file pruning ratio and repeatedly scanned cold partitions.
+- Compaction, clustering, partitioning, and metadata-maintenance candidates.
+- Tables responsible for recurring cost or latency regressions.
+
+Commands such as `qcli table inspect`, `qcli table health`, and
+`qcli query files` should consume adapter or external-inspector evidence through
+a stable metadata-enrichment contract. ConfluxQuery may recommend maintenance;
+it must not perform destructive table maintenance without a separate explicit,
+authorized workflow.
+
+### 4.8 Data contracts and result validation
+
+Named contracts can make queries useful as dependable data interfaces rather
+than one-off statements. A contract may specify schema, normalized types,
+nullability, uniqueness, row-count bounds, accepted ranges, freshness, decimal
+precision, and exact or tolerant comparison rules.
+
+```text
+qcli contract check daily_revenue --target snowflake-production
+qcli query --contract daily_revenue --file revenue.sql
+```
+
+Contracts must be versioned, reviewable, target-aware, and recorded in the
+query passport. Validation must stream or summarize with bounded resources and
+must distinguish schema compatibility, data-quality failure, query failure,
+and cross-engine semantic difference.
+
+### 4.9 Governed agent and MCP access
+
+ConfluxQuery Gateway can expose a Model Context Protocol surface for agents to
+discover authorized metadata, explain or transpile SQL, estimate cost, execute
+bounded read-only queries, retrieve results, cancel work, and inspect query
+passports. The MCP server must reuse the canonical service and authorization
+model; it is not a privileged shortcut around HTTP or Flight SQL.
+
+Agent access is read-only by default and requires strict row, byte, duration,
+cost, and concurrency limits, object-level authorization, result redaction,
+prompt-injection-aware metadata handling, and complete audit records. Model
+hosting and natural-language-to-SQL generation remain outside the trusted core:
+agents may propose SQL, while ConfluxQuery parses, authorizes, limits, executes,
+and records it.
 
 ## 5. Dialect-aware SQL transpilation
 
@@ -378,6 +453,11 @@ Both executions require independent authorization. Validation must avoid
 materializing unlimited results and must clearly distinguish exact, normalized,
 sampled, and probabilistic comparisons.
 
+Migration validation should later accept query directories, historical query
+workloads, dbt artifacts, and exported dashboard SQL. Reports should aggregate
+translation coverage, semantic mismatches, performance, and cost without
+turning a successful syntax conversion into a false compatibility claim.
+
 ### 5.11 Suggested transpiler delivery sequence
 
 Each increment should be independently demonstrable:
@@ -457,6 +537,10 @@ Serve mode can apply consistent controls before reaching a warehouse:
 - Daily or monthly team budgets.
 - Runaway-query cancellation.
 - Sensitive-result retention and sharing policy.
+- Workload classes such as interactive, dashboard, batch, migration, and agent.
+- Scheduled access windows, queue priorities, and bounded fairness.
+- Explicit approval workflows for high-cost or sensitive operations.
+- Per-team and per-cost-center attribution, alerts, and budget enforcement.
 
 These controls supplement rather than replace warehouse authorization. qcli
 should preserve the downstream identity where the authentication mode supports
@@ -510,9 +594,36 @@ Stable internal contracts should eventually allow:
 
 The first extension mechanism remains Rust workspace traits and crates. A stable
 third-party ABI or out-of-process plugin protocol should be designed only after
-the contracts have been exercised by multiple implementations.
+the contracts have been exercised by multiple implementations. Third-party
+extensions should prefer a versioned, process-isolated gRPC or WASI-component
+boundary over an unstable Rust dynamic-library ABI. Extension manifests must
+declare capabilities, configuration schema, secret access, network access,
+compatibility, and failure isolation.
 
-## 11. Product phases
+## 11. Provisional post-M26 milestone candidates
+
+These candidates capture the agreed direction for the next planning round.
+Their names and order are not authoritative implementation commitments until
+they receive detailed demo and exit-gate contracts in the execution plan.
+
+| Candidate | Product outcome |
+|---|---|
+| M27 — Query Passport and Unified Observability | One durable operational record, timeline, metrics, audit context, and export format for every query |
+| M28 — Query Intelligence and Plan Analysis | Normalize engine plans/profiles and publish evidence-linked performance recommendations |
+| M29 — Cost Governance and Workload Management | Admission, workload classes, queues, budgets, attribution, approvals, and runaway-query controls |
+| M30 — Governed MCP and Agent Connectivity | Safely expose metadata and bounded read-only query tools to authenticated agents |
+| M31 — Cross-Engine Migration Validation | Validate transpiled workloads with bounded schema/result/performance/cost comparisons |
+| M32 — Lakehouse Metadata Intelligence | Correlate table layout, pruning, metadata health, query performance, and maintenance recommendations |
+| M33 — Data Contracts and Result Quality | Version and enforce query schema, freshness, quality, and semantic comparison contracts |
+| M34 — Public Extension and Policy SDK | Add a versioned, isolated ecosystem boundary for adapters, policies, analyzers, stores, and enrichers |
+
+Cross-cutting work should be reused rather than postponed: M27 supplies the
+evidence model used by later milestones; M29 policy limits apply to M30 agents;
+M31 reuses M26 differential infrastructure; M32 may integrate the ConfluxData
+Lakehouse Cost Inspector; and M34 should package only contracts already proven
+by multiple built-in implementations.
+
+## 12. Product phases
 
 The roadmap can be understood as four product phases:
 
@@ -520,20 +631,22 @@ The roadmap can be understood as four product phases:
 |---|---|
 | Foundation | Reliable terminal and batch execution across three engines |
 | Connectivity gateway | Shared HTTP and Flight SQL service with ADBC/JDBC and governed sessions |
-| Intelligent gateway | Query passports, durable results, routing, cost controls, and credential brokerage |
+| Intelligent gateway | Query passports, plan intelligence, durable results, routing, cost controls, contracts, and credential brokerage |
 | Dialect-aware gateway | Explicit SQL transpilation, certified portable subsets, and differential migration validation |
+| Governed data interface | Bounded agent access, lakehouse intelligence, and isolated ecosystem extensions |
 
 The phases describe product maturity, not strict serialization. Foundational
 transpiler research and query-corpus collection may start before all enterprise
 gateway work is complete, but production execution must pass the required
 security, correctness, and conformance gates.
 
-## 12. Marquee product statement
+## 13. Marquee product statement
 
 The intended long-term positioning is:
 
-> ConfluxQuery is a governed, dialect-aware, Arrow-native query platform that lets
-> applications and people use one interface across analytical warehouses.
+> ConfluxQuery is the governed query control plane for modern data platforms:
+> connect, translate, inspect, optimize, and safely expose analytical data to
+> applications, people, and AI agents.
 
 Its strongest combined promises are:
 
@@ -545,6 +658,10 @@ Its strongest combined promises are:
    supported engine.
 6. Route eligible workloads using authorization, capability, health, and cost
    policy.
+7. Explain query behavior with evidence from plans, profiles, costs, and
+   lakehouse metadata.
+8. Give agents bounded access through the same identity, policy, lifecycle, and
+   audit boundary as every other client.
 
 qcli remains a gateway, not a warehouse: it governs and translates access while
 the selected engine performs the computation.

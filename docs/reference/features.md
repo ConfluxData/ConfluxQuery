@@ -18,6 +18,13 @@
 | Clients | ConfluxQuery JDBC Driver | Supported named surface |
 | Clients | ODBC and BI | Experimental |
 | SQL | Dialect-aware read-only transpilation | Next — M26 |
+| Intelligence | Query passport and plan analysis | Planned post-M26 |
+| Governance | Cost and workload management | Planned post-M26 |
+| Agents | Governed MCP connectivity | Planned post-M26 |
+| Migration | Cross-engine semantic validation | Planned post-M26 |
+| Lakehouse | Metadata and pruning intelligence | Planned post-M26 |
+| Quality | Data contracts and result validation | Planned post-M26 |
+| Extensions | Public policy and plugin SDK | Planned post-M26 |
 
 The authoritative version/client matrix is
 [connectivity compatibility](../connectivity-compatibility.md). Feature ideas

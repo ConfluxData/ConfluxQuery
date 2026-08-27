@@ -393,6 +393,10 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 
 Allowed status values are `Pending`, `In progress`, `Blocked`, and `Complete`. A milestone becomes `Complete` only after its automated tests, live or deterministic demo, documentation, and milestone report are present.
 
+M27–M34 are currently [provisional roadmap candidates](features-roadmap.md#11-provisional-post-m26-milestone-candidates).
+They enter this authoritative sequence only after the next product review gives
+each accepted candidate a detailed demo, boundary, and exit gate.
+
 ### M1 — Configuration and target discovery
 
 Demo:
