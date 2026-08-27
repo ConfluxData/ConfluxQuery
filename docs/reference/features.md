@@ -17,7 +17,7 @@
 | Clients | Upstream Arrow Flight SQL JDBC | Supported integration profile |
 | Clients | ConfluxQuery JDBC Driver | Supported named surface |
 | Clients | ODBC and BI | Experimental |
-| SQL | Cross-dialect transpilation | Planned |
+| SQL | Dialect-aware read-only transpilation | Next — M26 |
 
 The authoritative version/client matrix is
 [connectivity compatibility](../connectivity-compatibility.md). Feature ideas

@@ -389,6 +389,7 @@ This is the sequence used to implement and track qcli. Work begins on the first 
 | M24 — Unified connectivity release | Complete | Publish and operate the supported gateway connectivity surfaces |
 | M24.5 — Product documentation portal | Complete | Publish a complete, tested product and operations manual as a static site |
 | M25 — ConfluxQuery JDBC driver | Complete | Publish a branded Type 4 JDBC driver with explicit cross-engine support boundaries |
+| M26 — Dialect-aware SQL transpilation | Pending | Translate and safely execute a certified read-only SQL subset across Trino, Databricks SQL, and Snowflake |
 
 Allowed status values are `Pending`, `In progress`, `Blocked`, and `Complete`. A milestone becomes `Complete` only after its automated tests, live or deterministic demo, documentation, and milestone report are present.
 
@@ -1113,6 +1114,133 @@ Exit gate:
 - `docs/milestones/milestone-25-notes.md` records driver/server compatibility,
   conformance evidence, supported tools, and accepted limitations.
 
+### M26 — Dialect-aware SQL transpilation
+
+Demo:
+
+```text
+# Translate without connecting to a warehouse.
+qcli transpile \
+  --from snowflake \
+  --to databricks \
+  --file examples/transpilation/snowflake-report.sql \
+  --report json
+
+# Execute the same source SQL through an explicitly selected strict ruleset.
+qcli query \
+  --target databricks-validation \
+  --input-dialect snowflake \
+  --transpile strict \
+  --file examples/transpilation/snowflake-report.sql
+```
+
+The equivalent Gateway demo submits `POST /v1/sql/transpile`, then executes the
+source SQL with `input_dialect=snowflake` and `transpile=strict`. Flight SQL
+uses documented session options. All three surfaces must report the same
+generated SQL fingerprint, ruleset version, rewrites, warnings, and confidence.
+
+Product boundary:
+
+- Native SQL pass-through remains the default: `transpile=off`.
+- M26 supports explicitly declared Trino, Databricks SQL, and Snowflake source
+  and destination dialects. Automatic dialect detection is not a correctness
+  boundary and is not required.
+- Execution is limited to a versioned, certified, read-only portable subset.
+  Writes, DDL, scripting, procedures, administration, unsupported functions,
+  and semantically uncertain constructs fail closed before reaching an engine.
+- Offline `best_effort` translation may emit incomplete output only when the
+  report marks every uncertainty. `best_effort` SQL cannot execute in M26.
+- ConfluxQuery does not promise universal SQL equivalence or cross-engine joins.
+  One generated statement executes on one selected, authorized target.
+
+Implementation sequence:
+
+| Stage | Demoable outcome | Gate |
+|---|---|---|
+| M26.1 — Dialect inventory and ADR | Inspect the labelled corpus and selected library evaluation | ADR records rejected options, licenses, gaps, benchmarks, and fallback plan |
+| M26.2 — Offline translation core | Translate a simple query between every dialect pair and emit a deterministic JSON report | Golden, round-trip, source-map, malformed-input, and cross-platform determinism tests pass |
+| M26.3 — Portable subset v1 | Translate the documented read-only subset and reject a negative/ambiguous corpus | Every construct has an explicit supported, rewritten, warning, or rejected classification |
+| M26.4 — Shared execution integration | Execute strict transpilation from CLI and inspect immutable original/generated query data | Pass-through regression, dual-form policy, retry pinning, cancel, timeout, and audit tests pass |
+| M26.5 — HTTP integration | Translate offline and execute through documented OpenAPI operations | HTTP schema, ownership, redaction, quota, and CLI/HTTP parity profiles pass |
+| M26.6 — Flight/JDBC integration | Execute the same source SQL through native Flight SQL, ADBC, and ConfluxQuery JDBC | Session-option, warning/report, fingerprint, cancellation, and lifecycle parity profiles pass |
+| M26.7 — Three-engine certification | Run the portable corpus on Trino, Databricks SQL, and Snowflake | Protected schema/result differential profiles pass with published tolerances and engine versions |
+| M26.8 — Productization | Operate, troubleshoot, extend, upgrade, and roll back a versioned ruleset from the documentation | Full CI, security/resource, compatibility, documentation, packaging, and milestone-note gates pass |
+
+No stage changes the public status to supported before M26.8. Intermediate
+surfaces remain development-only even when their local demonstrations pass.
+
+Must demonstrate:
+
+- An ADR comparing viable Rust parser/transpiler foundations against source
+  locations, comments, dialect coverage, AST extensibility, formatter
+  stability, licensing, maintenance, performance, and known semantic gaps.
+- A protocol-neutral `qcli-transpile` boundary with no engine client, CLI,
+  HTTP, or Flight dependency. Engine adapters declare their destination
+  dialect/version and capability profile; they do not implement translation.
+- Versioned dialect identifiers, portable-subset version, ruleset identifier,
+  statement classification, normalized representation, rewrite registry, and
+  deterministic SQL generation.
+- Explicit modes `off`, `strict`, and offline-only `best_effort`, with typed
+  failures for parse errors, unsupported syntax, unsafe statement classes,
+  missing mappings, semantic risk, and target capability mismatch.
+- A structured translation report containing original and generated SQL,
+  dialect/ruleset versions, rewritten constructs, unsupported constructs,
+  semantic warnings, confidence, source-position mappings, and stable
+  fingerprints. Secret literals follow the existing redaction/audit policy.
+- An offline `qcli transpile` command accepting exactly one of `--command`,
+  `--file`, or stdin and producing SQL, human report, or stable JSON report.
+- Configuration and immutable session/query snapshot support for
+  `input_dialect`, `transpile`, `transpile_ruleset`, confidence/warning policy,
+  and the non-overridable M26 write prohibition, with normal default/target/
+  session/query precedence.
+- Execution integration before adapter submission and after authorization:
+  policy evaluates both the original normalized statement and generated SQL,
+  then the query snapshot records and executes exactly the approved generated
+  SQL. Retries cannot retranslate under a newer ruleset.
+- `POST /v1/sql/transpile` in OpenAPI/Swagger plus query request/report fields;
+  Flight SQL session options and protocol-native warnings or a documented
+  report retrieval path; identical behavior from CLI, HTTP, Flight, ADBC, and
+  the ConfluxQuery JDBC Driver.
+- An initial versioned read-only subset covering identifiers/literals, aliases,
+  predicates, joins, grouping, ordering, common scalar/aggregate functions,
+  compatible casts and primitive types, pagination, CTEs/subqueries, selected
+  date/string functions, standard windows, and only provably equivalent
+  `QUALIFY` rewrites.
+- A checked-in, provenance-labelled corpus of positive, negative, ambiguous,
+  and engine-specific queries. Golden tests cover syntax and reports;
+  metamorphic and differential profiles cover semantic behavior, NULLs,
+  decimals, timestamps/time zones, identifier case, ordering, and errors.
+- Bounded parse/translation time, input size, AST depth, report size, and
+  warning count. Malicious or pathological SQL cannot exhaust a CLI or Gateway
+  worker, bypass authorization, or expose SQL/literals through telemetry.
+- Query status, audit, metrics, and diagnostics that distinguish original SQL,
+  executed SQL, transpiler latency, ruleset, confidence, warnings, rejection
+  reason, and mapped engine-error position according to caller permissions.
+- Complete migration, configuration, API, Flight/JDBC, security, operations,
+  troubleshooting, supported-subset, and extension-author documentation.
+
+Exit gate:
+
+- Pass-through regression proves `transpile=off` sends byte-for-byte original
+  SQL and adds no parser requirement to existing native workflows.
+- Offline translation is deterministic across supported platforms and repeated
+  builds: identical input plus dialect/ruleset produces identical SQL, report,
+  fingerprints, and exit status.
+- Every advertised source/destination pair passes the shared positive and
+  fail-closed corpus. No unsupported statement is submitted to an adapter.
+- A deterministic reference fixture and protected live profiles execute the
+  certified read-only subset on Trino, Databricks SQL, and Snowflake and compare
+  schema and results using documented exact/tolerant semantics.
+- CLI, HTTP, native Flight SQL, supported ADBC clients, and ConfluxQuery JDBC
+  produce the same translation identity and execute the same recorded SQL.
+- Authorization-bypass, literal-redaction, pathological-input, concurrency,
+  cancellation, timeout, retry/ruleset-pinning, and resource-bound tests pass.
+- OpenAPI, configuration schema, CLI help, compatibility matrix, feature status,
+  and product documentation name the exact supported subset and limitations.
+- `docs/milestones/milestone-26-notes.md` records the ADR, corpus provenance,
+  ruleset/subset versions, per-engine conformance evidence, performance and
+  security evidence, and accepted limitations.
+
 ### Milestone completion artifacts
 
 Every milestone produces:
@@ -1721,6 +1849,43 @@ Gate:
 Deliverable: signed `in.confluxdata:confluxquery-jdbc` Maven artifact and
 standalone driver JAR.
 
+### Work package 25: Dialect-aware SQL transpilation
+
+Purpose: add an explicit, observable, fail-closed SQL translation stage that
+preserves native pass-through and shared query-governance boundaries.
+
+Tasks:
+
+- Inventory dialect/version differences and curate a licensed, traceable query
+  corpus for Trino, Databricks SQL, and Snowflake.
+- Record the parser/transpiler selection ADR, then establish the independent
+  normalized SQL, classification, ruleset, rewrite, generation, report, error,
+  and capability contracts.
+- Implement deterministic offline translation and stable human/JSON reports.
+- Define and certify portable-subset v1 with explicit negative capability
+  declarations and semantic-risk rules.
+- Add immutable translation settings and results to configuration, sessions,
+  query snapshots, passports, audit, metrics, and protected diagnostics.
+- Integrate explicit execution into the shared service before adapter
+  submission, including dual-form policy validation and ruleset pinning.
+- Expose the same contract through CLI, HTTP/OpenAPI, Flight SQL session
+  options, ADBC, and ConfluxQuery JDBC.
+- Add corpus, golden, property, differential, live-engine, security, fuzz,
+  performance, cancellation, concurrency, and resource-bound profiles.
+- Publish the supported-subset matrix, extension guide, migration workflows,
+  operational controls, limitations, and rollback procedure.
+
+Gate:
+
+- Portable-subset v1 passes deterministic and protected three-engine semantic
+  conformance through every supported frontend, while all non-certified and
+  write statements fail before adapter submission.
+- Native pass-through compatibility, security, bounded resources, immutable
+  execution records, and versioned reproducibility gates pass.
+
+Deliverable: opt-in ConfluxQuery SQL transpilation with offline tooling and a
+certified read-only cross-engine execution contract.
+
 ## 7. Workstream ownership
 
 These workstreams can proceed concurrently only after their dependencies stabilize:
@@ -1745,6 +1910,7 @@ These workstreams can proceed concurrently only after their dependencies stabili
 | Enterprise security | Flight production listener | OIDC, mTLS, hardened transport |
 | High availability | Stable ticket/state contracts | Shared state and failover |
 | ConfluxQuery JDBC driver | Unified connectivity release | Branded JDBC URL, Java artifact, and explicit per-engine certification |
+| SQL transpilation | Stable shared query snapshot and policy contracts | Offline translator, portable subset, execution integration, and semantic evidence |
 
 The second adapter is an architecture test. Expect small contract refinements, but reject changes that expose Databricks-specific concepts directly through generic frontend APIs. The third adapter should require fewer core changes; otherwise the abstraction remains too narrow.
 
@@ -1972,6 +2138,10 @@ The recommended first implementation sequence is:
 31. Add shared state, object results, query leases, and multi-node failover.
 32. Publish the unified HTTP/Flight/ADBC/JDBC/ODBC connectivity release.
 33. Publish the branded qcli Type 4 JDBC driver and certify it across supported engines and JDKs.
+34. Select the transpiler foundation and publish dialect corpus/subset v1 contracts.
+35. Ship deterministic offline translation and structured reports.
+36. Integrate strict read-only transpilation across CLI, HTTP, Flight SQL, ADBC, and JDBC.
+37. Certify the portable subset semantically across Trino, Databricks SQL, and Snowflake.
 
 ## 15. Definition of done
 

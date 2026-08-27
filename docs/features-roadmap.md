@@ -404,6 +404,20 @@ and transpiler can preserve source locations, dialect extensions, comments,
 types, and required rewrites. Library choice is an ADR, not an assumption in
 this roadmap.
 
+### 5.12 M26 delivery boundary
+
+M26 is the first implementation milestone for this roadmap area. It combines
+the inventory, offline translator, certified read-only subset, and explicit
+execution integration so the result is useful from both ConfluxQuery CLI and
+ConfluxQuery Gateway. Function/type breadth may grow in later milestones, but
+M26 is not complete with only a parser spike or syntax formatter.
+
+M26 requires `off`, `strict`, and offline-only `best_effort`. It does not enable
+automatic execution of best-effort output, dialect guessing as a correctness
+mechanism, writes, DDL, dynamic SQL, scripting, or cross-engine execution. The
+authoritative demo, support boundary, and completion gates are defined in the
+[M26 execution-plan contract](execution-plan.md#m26-dialect-aware-sql-transpilation).
+
 ## 6. Intelligent routing
 
 Logical targets may map to multiple physical targets:
