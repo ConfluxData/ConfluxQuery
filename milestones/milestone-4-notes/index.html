@@ -1,0 +1,2397 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="ConfluxQuery CLI and Gateway for Trino, Databricks SQL, and Snowflake">
+      
+      
+      
+        <link rel="canonical" href="https://confluxdata.github.io/ConfluxQuery/milestones/milestone-4-notes/">
+      
+      
+      
+      
+      <link rel="icon" href="../../assets/logo.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.6.20">
+    
+    
+      
+        <title>Milestone 4 Notes: Real Trino Execution - ConfluxQuery</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.e53b48f4.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.06af60db.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="cyan">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#milestone-4-notes-real-trino-execution" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="ConfluxQuery" class="md-header__button md-logo" aria-label="ConfluxQuery" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            ConfluxQuery
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Milestone 4 Notes: Real Trino Execution
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="cyan"  aria-label="Use dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Use dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="cyan"  aria-label="Use light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Use light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/ConfluxData/ConfluxQuery" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    ConfluxData/ConfluxQuery
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../product/why-qcli/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Product
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/install/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Get started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../concepts/architecture/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/cli/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  ConfluxQuery CLI
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../server/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  ConfluxQuery Gateway
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/how-to/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  How-to
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../connectivity-compatibility/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="ConfluxQuery" class="md-nav__button md-logo" aria-label="ConfluxQuery" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    ConfluxQuery
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/ConfluxData/ConfluxQuery" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    ConfluxData/ConfluxQuery
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Home
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Product
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            Product
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../product/why-qcli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Why ConfluxQuery
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../product/evolution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Evolution
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../product/support-policy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Support policy
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Get started
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            Get started
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Install
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/cli-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ConfluxQuery CLI quickstart
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/server-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ConfluxQuery Gateway quickstart
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Concepts
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            Concepts
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Architecture
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Configuration and targets
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/query-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Sessions, queries, and results
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Security and identity
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../high-availability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    High availability
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../ingestion-and-advanced-transfer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Ingestion and transfer
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    ConfluxQuery CLI
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            ConfluxQuery CLI
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Complete command reference
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/repl/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Interactive shell
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Configuration properties
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/cli-automation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Output and automation
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/engines/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Engine setup
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../server/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    ConfluxQuery Gateway
+    
+  </span>
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            ConfluxQuery Gateway
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../server/http/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    HTTP API workflows
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../server/flight-sql/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Flight SQL
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../server/jdbc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    JDBC Driver
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../server/clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Client ecosystem
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Deployment and operations
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../enterprise-identity-and-transport/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Enterprise identity
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    How-to
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            How-to
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/how-to/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Common tasks
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Troubleshooting
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../releasing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Releases and upgrades
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" >
+        
+          
+          <label class="md-nav__link" for="__nav_8" id="__nav_8_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Reference
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            Reference
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectivity-compatibility/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Compatibility
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../supported-platforms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Supported platforms
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Feature status
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../brand-directives/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Brand directives
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../unified-connectivity-release/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Unified release contract
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../odbc-bi-connectivity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Experimental ODBC/BI
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../product-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Product design record
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../features-roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Feature roadmap
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../execution-plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Execution plan
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8_10" >
+        
+          
+          <label class="md-nav__link" for="__nav_8_10" id="__nav_8_10_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Architecture decisions
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_8_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8_10">
+            <span class="md-nav__icon md-icon"></span>
+            Architecture decisions
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr-001-independent-from-datafusion-cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    DataFusion CLI decision
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr-002-trino-direct-http-protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Trino client decision
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr-003-extensible-authentication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Authentication design
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr-004-databricks-snowflake-clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Warehouse clients
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr-005-http-caller-authentication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    HTTP caller auth
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adr-006-flight-sql-data-plane/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Flight SQL data plane
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#demonstrated-outcome" class="md-nav__link">
+    <span class="md-ellipsis">
+      Demonstrated outcome
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#architecture-decision" class="md-nav__link">
+    <span class="md-ellipsis">
+      Architecture decision
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#delivered" class="md-nav__link">
+    <span class="md-ellipsis">
+      Delivered
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#session-property-behavior" class="md-nav__link">
+    <span class="md-ellipsis">
+      Session property behavior
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#authentication-and-tls-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      Authentication and TLS policy
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#type-conversion-evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      Type conversion evidence
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#live-container-evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      Live container evidence
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reproducible-live-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      Reproducible live tests
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#client-selection-spike" class="md-nav__link">
+    <span class="md-ellipsis">
+      Client selection spike
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upstream-client-improvements" class="md-nav__link">
+    <span class="md-ellipsis">
+      Upstream client improvements
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#automated-evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      Automated evidence
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#backpressure-issue-found-by-the-live-gate" class="md-nav__link">
+    <span class="md-ellipsis">
+      Backpressure issue found by the live gate
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#known-limitations" class="md-nav__link">
+    <span class="md-ellipsis">
+      Known limitations
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prerequisites-established-for-milestone-5" class="md-nav__link">
+    <span class="md-ellipsis">
+      Prerequisites established for Milestone 5
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="milestone-4-notes-real-trino-execution">Milestone 4 Notes: Real Trino Execution<a class="headerlink" href="#milestone-4-notes-real-trino-execution" title="Permanent link">&para;</a></h1>
+<p>Status: Complete</p>
+<p>Completed: 2026-07-21</p>
+<h2 id="demonstrated-outcome">Demonstrated outcome<a class="headerlink" href="#demonstrated-outcome" title="Permanent link">&para;</a></h2>
+<p>qcli now executes native SQL against Trino through the reusable core and
+output pipeline:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>$ qcli --config examples/milestone-4.env target test trino-local
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>Target 'trino-local' is reachable (trino, 1 test row(s))
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>Engine query ID: 20260721_110618_00001_srbua
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>$ qcli --config examples/milestone-4.env \
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    --target trino-local \
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    --command "SELECT current_catalog, current_schema"
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>┌───────┬───────┐
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>│ _col0 │ _col1 │
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>├───────┼───────┤
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>│ tpch  │ tiny  │
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>└───────┴───────┘
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>1 rows
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>Splits: 1/1
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>Processed: 0 rows, 0 bytes
+<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>Time: 0.062s
+</code></pre></div>
+<p>The implementation uses <code>trino-rust-client</code> 0.11 to submit native SQL, retrieve
+every result page, maintain Trino session headers, and cancel by query ID.</p>
+<h2 id="architecture-decision">Architecture decision<a class="headerlink" href="#architecture-decision" title="Permanent link">&para;</a></h2>
+<p><a href="../../adr-002-trino-direct-http-protocol/">ADR-002</a> selects
+<code>trino-rust-client</code> behind qcli's engine-adapter boundary.</p>
+<p>This keeps Trino-specific concerns in <code>qcli-driver-trino</code>:</p>
+<ul>
+<li>Client construction and qcli-specific connection policy.</li>
+<li>Low-level query-page traversal through the client.</li>
+<li>Trino type signatures.</li>
+<li>Remote errors, statistics, retry, and cancellation.</li>
+</ul>
+<p>There are no Trino-specific branches in <code>qcli-core</code> or <code>qcli-output</code>. The CLI
+registers available adapters and submits through the common trait.</p>
+<h2 id="delivered">Delivered<a class="headerlink" href="#delivered" title="Permanent link">&para;</a></h2>
+<ul>
+<li>New reusable <code>qcli-driver-trino</code> crate.</li>
+<li>Native SQL body pass-through without parsing or rewriting.</li>
+<li><code>trino-rust-client</code> 0.11 integration using its low-level page API.</li>
+<li>Native statement submission and <code>nextUri</code> pagination until completion.</li>
+<li>Query-ID cancellation through the client's public API.</li>
+<li>Remote Trino query ID events.</li>
+<li>Common progress snapshots for state, scheduling, splits, processed rows,
+  processed bytes, and elapsed milliseconds when available.</li>
+<li>Final timing, split, and processed-data summaries on stderr.</li>
+<li>Generic <code>qcli target test TARGET</code> implemented with <code>SELECT 1</code>.</li>
+<li>Generic adapter registry containing demo and Trino adapters.</li>
+<li>Stable connection/authentication exit code <code>4</code>.</li>
+<li>Structured connection, timeout, authentication, protocol, query, type,
+  cancellation, and consumer errors.</li>
+<li>Conservative retry for HTTP 502, 503, and 504.</li>
+<li><code>Retry-After</code> support for HTTP 429.</li>
+<li>Basic authentication using <code>user</code> and <code>password</code>.</li>
+<li>Bearer/JWT authentication using <code>token</code>.</li>
+<li>HTTPS with certificate verification enabled by default through the client.</li>
+<li>Explicit <code>tls_verify=false</code> development override.</li>
+<li>Refusal to send password or token credentials over plain HTTP.</li>
+<li>Catalog, schema, source, user, client tags, and <code>session.*</code> propagation.</li>
+<li>Configured connection and request deadlines.</li>
+<li>Arrow conversion driven by Trino type signatures.</li>
+<li>Scalar boolean, integer, floating-point, character, binary, date/time,
+  interval, JSON, IP address, and UUID mappings.</li>
+<li>Exact Decimal128 conversion.</li>
+<li>Typed arrays, maps, and row/struct conversion.</li>
+<li>Wider human rendering for Arrow scalar and nested types.</li>
+</ul>
+<h2 id="session-property-behavior">Session property behavior<a class="headerlink" href="#session-property-behavior" title="Permanent link">&para;</a></h2>
+<p>Every target property prefixed with <code>session.</code> is sent without the prefix in
+the <code>X-Trino-Session</code> header. For example:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="na">session.query_max_run_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">30m</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="na">session.join_distribution_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">AUTOMATIC</span>
+</code></pre></div>
+<p>becomes:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>X-Trino-Session: query_max_run_time=30m,join_distribution_type=AUTOMATIC
+</code></pre></div>
+<p>The immutable session snapshot guarantees that later session changes cannot
+alter an already submitted query.</p>
+<h2 id="authentication-and-tls-policy">Authentication and TLS policy<a class="headerlink" href="#authentication-and-tls-policy" title="Permanent link">&para;</a></h2>
+<p>The initial supported modes are:</p>
+<ul>
+<li>Unauthenticated Trino with an explicit user header.</li>
+<li>HTTP Basic authentication with <code>user</code> and <code>password</code>.</li>
+<li>Bearer/JWT authentication with <code>token</code>.</li>
+</ul>
+<p>Password and token modes require an <code>https://</code> URL. The client TLS stack uses
+platform verification by default. Unit tests
+verify both authorization header forms, reject mixed authentication, reject a
+password without a user, reject credentials over HTTP, and confirm that errors
+do not contain the secret.</p>
+<h2 id="type-conversion-evidence">Type conversion evidence<a class="headerlink" href="#type-conversion-evidence" title="Permanent link">&para;</a></h2>
+<p>The live Trino 483 query:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">SELECT</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nb">DECIMAL</span><span class="w"> </span><span class="s1">'12345678901234.123456'</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">price</span><span class="p">,</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="nb">ARRAY</span><span class="p">[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">]</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">items</span><span class="p">,</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span><span class="k">MAP</span><span class="p">(</span><span class="nb">ARRAY</span><span class="p">[</span><span class="s1">'a'</span><span class="p">],</span><span class="w"> </span><span class="nb">ARRAY</span><span class="p">[</span><span class="mi">7</span><span class="p">])</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">labels</span><span class="p">,</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">  </span><span class="k">CAST</span><span class="p">(</span><span class="k">ROW</span><span class="p">(</span><span class="mi">9</span><span class="p">,</span><span class="w"> </span><span class="s1">'north'</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="k">ROW</span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="nb">bigint</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="nb">varchar</span><span class="p">))</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">point</span>
+</code></pre></div>
+<p>produced exact JSONL:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="p">{</span><span class="nt">"price"</span><span class="p">:</span><span class="s2">"12345678901234.123456"</span><span class="p">,</span><span class="nt">"items"</span><span class="p">:[</span><span class="mi">1</span><span class="p">,</span><span class="mi">2</span><span class="p">],</span><span class="nt">"labels"</span><span class="p">:{</span><span class="nt">"a"</span><span class="p">:</span><span class="mi">7</span><span class="p">},</span><span class="nt">"point"</span><span class="p">:{</span><span class="nt">"x"</span><span class="p">:</span><span class="mi">9</span><span class="p">,</span><span class="nt">"y"</span><span class="p">:</span><span class="s2">"north"</span><span class="p">}}</span>
+</code></pre></div>
+<p>The decimal remains a string in JSON according to qcli's exact-value policy.
+Arrays, maps, and rows remain typed nested Arrow values through the output
+boundary.</p>
+<h2 id="live-container-evidence">Live container evidence<a class="headerlink" href="#live-container-evidence" title="Permanent link">&para;</a></h2>
+<p>The live exit gate used the official <code>trinodb/trino:483</code> image with the TPCH
+catalog. The container reported healthy before tests started.</p>
+<p>Verified live paths:</p>
+<ul>
+<li><code>target test</code> with a remote query ID.</li>
+<li>Catalog and schema context.</li>
+<li>Native SQL and exact complex values.</li>
+<li>Table and JSONL output.</li>
+<li>100,000-row export from <code>tpch.sf1.lineitem</code>.</li>
+<li>Multiple result pages and bounded batch delivery.</li>
+<li>Final Trino split and processed-data metrics.</li>
+<li>Confirmed cancellation of a running <code>tpch.sf100000</code> aggregation.</li>
+</ul>
+<p>The 100,000-row export completed with 21/21 splits and reported 19,723,105
+processed bytes. The manual JSONL-to-sink run completed in approximately five
+seconds on this development machine.</p>
+<h2 id="reproducible-live-tests">Reproducible live tests<a class="headerlink" href="#reproducible-live-tests" title="Permanent link">&para;</a></h2>
+<p>Start Trino:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>docker run --rm --name qcli-m4-trino -p 8080:8080 trinodb/trino:483
+</code></pre></div>
+<p>Run the standard CLI demonstrations with <code>examples/milestone-4.env</code>.</p>
+<p>Run the opt-in live gates:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>QCLI_TRINO_URL=http://127.0.0.1:8080 \
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>  cargo test -p qcli-driver-trino \
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>  tests::live_trino_streams_multiple_result_pages -- --ignored --exact
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>QCLI_TRINO_URL=http://127.0.0.1:8080 \
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>  cargo test -p qcli-driver-trino \
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>  tests::live_trino_cancellation_is_confirmed -- --ignored --exact
+</code></pre></div>
+<p>Both live tests passed. The pagination gate received exactly 100,000 rows over
+more than one page. The cancellation gate completed in about 0.12 seconds and
+  received Trino's successful cancellation response.</p>
+<h2 id="client-selection-spike">Client selection spike<a class="headerlink" href="#client-selection-spike" title="Permanent link">&para;</a></h2>
+<p>Before adopting the dependency, qcli ran an isolated spike with
+<code>trino-rust-client</code> 0.11 against Trino on <code>localhost:8080</code>. It verified:</p>
+<ul>
+<li>Exact column metadata and complex type signatures.</li>
+<li>Lazy retrieval of exactly 100,000 rows over multiple direct-protocol pages.</li>
+<li>Cancellation by remote query ID.</li>
+<li>Response-driven <code>USE tpch.sf1</code> and <code>SET SESSION</code> state persisted into the
+  next query.</li>
+<li>Direct page access to query IDs, columns, statistics, errors, and <code>nextUri</code>.</li>
+</ul>
+<p>The server was not configured to return spooled pages, so the spike verified
+the client's spooling request/fallback behavior but not an end-to-end spooled
+segment download.</p>
+<p>We chose this client because it covers the error-prone Trino protocol and
+session-header machinery while still exposing low-level pages. qcli deliberately
+does not use <code>get_all</code> (unbounded materialization) or the high-level <code>RowStream</code>
+(query ID and final statistics are not exposed). This leaves qcli in control of
+bounded Arrow batches, progress, cancellation semantics, and frontend-neutral
+events without duplicating the wire client.</p>
+<p>After integration, both ignored live gates passed again on <code>localhost:8080</code>:
+100,000-row multi-page streaming and confirmed cancellation.</p>
+<h2 id="upstream-client-improvements">Upstream client improvements<a class="headerlink" href="#upstream-client-improvements" title="Permanent link">&para;</a></h2>
+<p>No blocking defect was found for Milestone 4's direct protocol. The following
+enhancements would let qcli remove workarounds or adopt more client features:</p>
+<ul>
+<li>Expose query ID and current/final statistics from <code>RowStream</code>, ideally as
+  metadata accessors or page events.</li>
+<li>Provide separate connect and whole-request timeouts. qcli currently maps its
+  configured deadline to the single client request timeout.</li>
+<li>Allow injecting/configuring the underlying HTTP client, especially redirect
+  policy. qcli cannot currently enforce redirects-off through the public API.</li>
+<li>Extend low-level page retries to 429 (honoring <code>Retry-After</code>), 502, and 504.
+  qcli currently supplies this thin policy around the client calls.</li>
+<li>Make spooling opt-in/opt-out explicit and return decoding errors instead of a
+  panic/empty result from low-level <code>QueryResultData::into_vec</code>; remote spooled
+  segments also need a low-level streaming path that preserves page metadata.</li>
+<li>Expose a read-only session snapshot so response-driven catalog, schema, role,
+  and session changes can be synchronized with qcli's shared session state.</li>
+</ul>
+<p>These are proposed upstream improvements, not reasons to fork the client. The
+only qcli compatibility change required now is raising the workspace MSRV from
+Rust 1.85 to 1.86, matching <code>trino-rust-client</code> 0.11.</p>
+<h2 id="automated-evidence">Automated evidence<a class="headerlink" href="#automated-evidence" title="Permanent link">&para;</a></h2>
+<p>The ordinary workspace suite covers:</p>
+<ul>
+<li>Exact native SQL request body.</li>
+<li>User, catalog, schema, source, and session headers.</li>
+<li>Two-page result retrieval.</li>
+<li>Remote query IDs and progress events.</li>
+<li>Decimal, array, map, and row conversion.</li>
+<li>Basic and bearer authentication construction.</li>
+<li>Credential transport safety and secret leakage.</li>
+<li>Transient gateway retry.</li>
+<li>Confirmed cancellation and DELETE semantics.</li>
+<li>Generic target testing and connection exit code <code>4</code>.</li>
+</ul>
+<p>The two live Trino tests are ignored in the ordinary suite because they require
+a coordinator URL. They were executed separately against the pinned container
+for this milestone.</p>
+<p><code>cargo test --workspace</code> passes 31 regular tests. Three explicit release/live
+gates are intentionally ignored by that command: the Milestone 3 million-row
+gate and the two Milestone 4 Trino container gates.</p>
+<p><code>cargo clippy --workspace --all-targets -- -D warnings</code> passes.</p>
+<p><code>cargo fmt --all -- --check</code> passes.</p>
+<h2 id="backpressure-issue-found-by-the-live-gate">Backpressure issue found by the live gate<a class="headerlink" href="#backpressure-issue-found-by-the-live-gate" title="Permanent link">&para;</a></h2>
+<p>The first live <code>target test</code> found that publishing an awaited progress event on
+every Trino page could fill the bounded event channel while a batch frontend
+was draining result batches. That prevented terminal events from closing the
+query stream.</p>
+<p>Batch mode now emits the final progress snapshot only, while query identity and
+lifecycle transitions remain guaranteed. Result pages remain backpressured by
+the bounded batch channel. A future combined event/result stream or watch-style
+progress channel can support high-frequency interactive refresh without this
+contention.</p>
+<h2 id="known-limitations">Known limitations<a class="headerlink" href="#known-limitations" title="Permanent link">&para;</a></h2>
+<ul>
+<li>OAuth browser flows, Kerberos, and client-certificate authentication are not
+  included yet.</li>
+<li>The optional Trino spooling protocol is not requested; the direct protocol is
+  used.</li>
+<li>Response-driven session mutations are persisted inside each client but are
+  not yet surfaced into qcli's shared session snapshot.</li>
+<li>A cancellation requested before Trino returns <code>nextUri</code> is explicitly
+  reported as <code>cancel_unconfirmed</code>.</li>
+<li>Batch mode reports the final progress snapshot rather than every intermediate
+  page to protect bounded lifecycle delivery.</li>
+<li>Temporal values currently preserve Trino's exact textual representation in
+  UTF-8 Arrow columns. Native Arrow temporal normalization can be added after
+  timezone semantics are finalized.</li>
+<li>Non-string Trino map keys need broader live fixtures across supported Trino
+  versions.</li>
+<li>TLS and authorization headers are covered deterministically; the milestone
+  container itself used Trino's local unauthenticated HTTP development mode.</li>
+</ul>
+<h2 id="prerequisites-established-for-milestone-5">Prerequisites established for Milestone 5<a class="headerlink" href="#prerequisites-established-for-milestone-5" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Interactive queries can reuse the same Trino adapter and Arrow stream.</li>
+<li>Remote IDs, cancellation, progress, timing, and engine errors are exposed
+  through frontend-neutral contracts.</li>
+<li>Session property headers already accept immutable session snapshots.</li>
+<li>The terminal can add target selection and context mutation without embedding
+  Trino protocol logic.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      ConfluxQuery by ConfluxData &middot; Copyright &copy; contributors
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      <script id="__config" type="application/json">{"base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "navigation.top", "navigation.footer", "content.code.copy", "content.tabs.link", "search.highlight", "search.suggest"], "search": "../../assets/javascripts/workers/search.973d3a69.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.f55a23d4.min.js"></script>
+      
+    
+  </body>
+</html>
