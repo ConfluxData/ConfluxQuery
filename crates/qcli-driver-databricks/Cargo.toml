@@ -1,0 +1,22 @@
+[package]
+name = "qcli-driver-databricks"
+description = "Databricks SQL Statement Execution adapter for qcli"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+arrow-array.workspace = true
+arrow-json.workspace = true
+arrow-schema.workspace = true
+async-trait.workspace = true
+qcli-auth = { version = "0.1.0", path = "../qcli-auth" }
+qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

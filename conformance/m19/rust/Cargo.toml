@@ -1,0 +1,12 @@
+[package]
+name = "qcli-m19-rust-adbc"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+adbc-driver-flightsql = "=0.1.2"
+adbc_core = "=0.24.0"
+adbc_driver_manager = "=0.24.0"

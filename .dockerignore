@@ -1,0 +1,11 @@
+.git
+.github
+target
+dist
+.qcli
+.env
+coverage
+conformance
+docs/milestones
+**/__pycache__
+**/*.log

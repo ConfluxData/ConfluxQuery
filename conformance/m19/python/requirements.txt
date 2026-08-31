@@ -1,0 +1,2 @@
+adbc-driver-flightsql==1.12.0
+pyarrow==25.0.1

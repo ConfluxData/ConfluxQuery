@@ -1,0 +1,13 @@
+# Public deterministic demo credential only. Never reuse it outside the M11 demo.
+# API key:
+# qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+
+[principals.demo]
+targets = ["demo"]
+max_sessions = 2
+max_concurrent_queries = 2
+
+[keys.demo-key]
+principal = "demo"
+secret_hash = "$argon2id$v=19$m=19456,t=2,p=1$cP3dNZgaRnG9aMPT/s/owQ$WUyjSDlv8UtHHE98HJUaG463NKhejvwI0Dce2e9sfLQ"
+enabled = true

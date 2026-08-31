@@ -1,0 +1,8 @@
+complete -c qcli -l help -d 'Show help'
+complete -c qcli -l version -d 'Show version'
+complete -c qcli -l config -r -F -d 'Configuration file'
+complete -c qcli -l target -r -d 'Target name'
+complete -c qcli -l command -r -d 'SQL text'
+complete -c qcli -l file -r -F -d 'SQL file'
+complete -c qcli -l format -r -a 'table vertical csv tsv json jsonl' -d 'Result format'
+complete -c qcli -f -a 'config target auth serve'

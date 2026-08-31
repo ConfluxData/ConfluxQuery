@@ -1,0 +1,7 @@
+[advisories]
+# qcli uses jsonwebtoken's RSA support only to verify externally signed JWTs
+# with public JWK material. It never loads or operates on an RSA private key,
+# so the private-key timing side channel in rsa 0.9 is not reachable. Remove
+# this exception when jsonwebtoken moves to a patched RSA implementation.
+# Security review date: 2026-08-31.
+ignore = ["RUSTSEC-2023-0071"]

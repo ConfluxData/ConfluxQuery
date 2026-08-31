@@ -1,0 +1,237 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  documentation:
+    name: Product documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+      - run: python -m pip install -r requirements-docs.txt
+      - run: bash scripts/check-docs.sh
+
+  quality:
+    name: Format, lint, and docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+      - run: cargo build --release --locked -p qcli
+      - name: Installed-binary smoke test
+        shell: bash
+        run: |
+          binary="target/release/qcli"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then binary="${binary}.exe"; fi
+          "$binary" --version
+          "$binary" --config examples/milestone-2.env config check
+          "$binary" --config examples/milestone-2.env target list
+
+  msrv:
+    name: Minimum Rust 1.89
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo check --workspace --all-targets --locked
+
+  security:
+    name: Dependency vulnerability audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  jdbc-driver:
+    name: ConfluxQuery JDBC (JDK ${{ matrix.java }})
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ["17", "21"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+          cache-dependency-path: jdbc/pom.xml
+      - run: mvn -B -f jdbc/pom.xml clean verify
+      - name: Verify reproducible standalone JAR
+        shell: bash
+        run: |
+          first="$(sha256sum jdbc/target/confluxquery-jdbc-*-all.jar | cut -d' ' -f1)"
+          mvn -B -q -f jdbc/pom.xml clean package -DskipTests
+          second="$(sha256sum jdbc/target/confluxquery-jdbc-*-all.jar | cut -d' ' -f1)"
+          test "$first" = "$second"
+
+  connectivity-conformance:
+    name: ADBC and JDBC conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: m19-rust-adbc
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: conformance/m19/python/requirements.txt
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.6"
+          cache-dependency-path: conformance/m19/go/go.sum
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: |
+            jdbc/pom.xml
+            conformance/m19/java/pom.xml
+            conformance/m25/java/pom.xml
+      - run: cargo build --release --locked -p qcli
+      - run: mvn -B -f jdbc/pom.xml install
+      - name: Start packaged-equivalent demo gateway
+        shell: bash
+        run: |
+          cp examples/milestone-11-auth.toml /tmp/qcli-m19-auth.toml
+          chmod 600 /tmp/qcli-m19-auth.toml
+          target/release/qcli --config examples/milestone-2.env serve \
+            --bind 127.0.0.1:18089 \
+            --auth-file /tmp/qcli-m19-auth.toml \
+            --flight-bind 127.0.0.1:32010 \
+            >/tmp/qcli-m19-server.log 2>&1 &
+          echo "$!" > /tmp/qcli-m19-server.pid
+          for attempt in {1..60}; do
+            if curl --silent --fail http://127.0.0.1:18089/openapi.json >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/qcli-m19-server.log
+          exit 1
+      - run: pip install -r conformance/m19/python/requirements.txt
+      - name: Python ADBC 1.12
+        run: python conformance/m19/python/profile.py
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: demo
+      - name: Go ADBC 1.12
+        working-directory: conformance/m19/go
+        run: go run .
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: demo
+      - name: Java ADBC 0.24
+        run: mvn -q -f conformance/m19/java/pom.xml compile exec:java -Dexec.mainClass=org.apache.qcli.AdbcProfile
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: demo
+          MAVEN_OPTS: --add-opens=java.base/java.nio=ALL-UNNAMED
+      - name: Arrow Flight SQL JDBC 19
+        run: mvn -q -f conformance/m19/java/pom.xml exec:java -Dexec.mainClass=org.apache.qcli.JdbcProfile
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: demo
+          MAVEN_OPTS: --add-opens=java.base/java.nio=ALL-UNNAMED
+      - name: ConfluxQuery JDBC 0.1
+        run: mvn -B -q -f conformance/m25/java/pom.xml compile exec:java -Dexec.mainClass=in.confluxdata.query.jdbc.ConformanceProfile
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: demo
+          MAVEN_OPTS: --add-opens=java.base/java.nio=ALL-UNNAMED
+      - name: Rust ADBC C driver manager 0.24
+        run: cargo run --locked --manifest-path conformance/m19/rust/Cargo.toml
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: demo
+      - name: M20 ODBC profile integrity
+        run: python -c 'from pathlib import Path; compile(Path("conformance/m20/python/profile.py").read_text(), "profile.py", "exec")'
+      - name: Stop gateway
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f /tmp/qcli-m19-server.pid ]]; then kill "$(cat /tmp/qcli-m19-server.pid)" || true; fi
+          cat /tmp/qcli-m19-server.log || true
+
+  release-gates:
+    name: Load, HA, packaging, and container gates
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: qcli_test
+          POSTGRES_DB: qcli_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d qcli_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: PostgreSQL fencing and distributed quota profile
+        run: cargo test -p qcli-cluster postgres_coordination_profile --locked -- --ignored
+        env:
+          QCLI_TEST_POSTGRES_URL: postgresql://postgres:qcli_test@127.0.0.1:5432/qcli_test
+      - name: Million-row bounded streaming profile
+        run: cargo test --release -p qcli-core million_rows_stream_in_bounded_batches_to_csv_and_jsonl --locked -- --ignored
+      - name: Build release archive
+        run: |
+          cargo build --release --locked -p qcli
+          bash scripts/package-release.sh x86_64-unknown-linux-gnu 0.1.0-ci
+          tar -tzf dist/qcli-0.1.0-ci-x86_64-unknown-linux-gnu.tar.gz
+      - name: Build and smoke container
+        run: |
+          docker build --tag qcli:ci .
+          docker run --rm qcli:ci --version

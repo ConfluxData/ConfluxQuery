@@ -1,0 +1,17 @@
+[package]
+name = "qcli-metadata"
+description = "Scoped metadata discovery and caching for qcli"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

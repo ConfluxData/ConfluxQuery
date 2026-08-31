@@ -1,0 +1,22 @@
+[package]
+name = "qcli-cluster"
+description = "Pluggable qcli cluster coordination and shared result storage"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+object_store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

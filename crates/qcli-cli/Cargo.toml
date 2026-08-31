@@ -1,0 +1,33 @@
+[package]
+name = "qcli"
+description = "One query shell for cloud data platforms"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+qcli-auth = { version = "0.1.0", path = "../qcli-auth" }
+qcli-config = { version = "0.1.0", path = "../qcli-config" }
+qcli-cluster = { version = "0.1.0", path = "../qcli-cluster" }
+qcli-core = { version = "0.1.0", path = "../qcli-core" }
+qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
+qcli-driver-demo = { version = "0.1.0", path = "../qcli-driver-demo" }
+qcli-driver-databricks = { version = "0.1.0", path = "../qcli-driver-databricks" }
+qcli-driver-snowflake = { version = "0.1.0", path = "../qcli-driver-snowflake" }
+qcli-driver-trino = { version = "0.1.0", path = "../qcli-driver-trino" }
+qcli-flight-sql = { version = "0.1.0", path = "../qcli-flight-sql" }
+qcli-http = { version = "0.1.0", path = "../qcli-http" }
+qcli-output = { version = "0.1.0", path = "../qcli-output" }
+qcli-repl = { version = "0.1.0", path = "../qcli-repl" }
+qcli-service = { version = "0.1.0", path = "../qcli-service" }
+tokio.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+qcli-driver-conformance = { version = "0.1.0", path = "../qcli-driver-conformance" }
+
+[target.'cfg(unix)'.dev-dependencies]
+expectrl = "0.9.0"

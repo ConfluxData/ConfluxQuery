@@ -1,0 +1,133 @@
+name: Live connectivity certification
+
+on:
+  workflow_dispatch:
+    inputs:
+      trino_target:
+        description: Trino target section name
+        required: true
+        default: trino
+      databricks_target:
+        description: Databricks target section name
+        required: true
+        default: databricks
+      snowflake_target:
+        description: Snowflake target section name
+        required: true
+        default: snowflake
+
+permissions:
+  contents: read
+
+jobs:
+  adbc-live:
+    name: ADBC — ${{ matrix.engine }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: trino
+            target: ${{ inputs.trino_target }}
+          - engine: databricks
+            target: ${{ inputs.databricks_target }}
+          - engine: snowflake
+            target: ${{ inputs.snowflake_target }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: conformance/m19/python/requirements.txt
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.6"
+          cache-dependency-path: conformance/m19/go/go.sum
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: |
+            jdbc/pom.xml
+            conformance/m19/java/pom.xml
+            conformance/m25/java/pom.xml
+      - run: cargo build --release --locked -p qcli
+      - run: mvn -B -f jdbc/pom.xml install
+      - name: Materialize protected live configuration
+        shell: bash
+        env:
+          LIVE_CONFIG: ${{ secrets.QCLI_LIVE_CONFIG }}
+          LIVE_AUTH: ${{ secrets.QCLI_LIVE_AUTH }}
+        run: |
+          test -n "$LIVE_CONFIG"
+          test -n "$LIVE_AUTH"
+          printf '%s' "$LIVE_CONFIG" > /tmp/qcli-live.env
+          printf '%s' "$LIVE_AUTH" > /tmp/qcli-live-auth.toml
+          chmod 600 /tmp/qcli-live.env /tmp/qcli-live-auth.toml
+      - name: Start live gateway
+        shell: bash
+        run: |
+          target/release/qcli --config /tmp/qcli-live.env serve \
+            --bind 127.0.0.1:18089 \
+            --auth-file /tmp/qcli-live-auth.toml \
+            --flight-bind 127.0.0.1:32010 \
+            >/tmp/qcli-live-server.log 2>&1 &
+          echo "$!" > /tmp/qcli-live-server.pid
+          for attempt in {1..60}; do
+            if curl --silent --fail http://127.0.0.1:18089/openapi.json >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/qcli-live-server.log
+          exit 1
+      - run: pip install -r conformance/m19/python/requirements.txt
+      - name: Python ADBC
+        run: python conformance/m19/python/profile.py
+        env:
+          QCLI_FLIGHT_TOKEN: ${{ secrets.QCLI_LIVE_TOKEN }}
+          QCLI_FLIGHT_TARGET: ${{ matrix.target }}
+          QCLI_FLIGHT_QUERY: SELECT 1 AS qcli_m19_value
+          QCLI_FLIGHT_EXPECTED_ROWS: "1"
+          QCLI_FLIGHT_TEST_PREPARED: "false"
+      - name: Go ADBC
+        working-directory: conformance/m19/go
+        run: go run .
+        env:
+          QCLI_FLIGHT_TOKEN: ${{ secrets.QCLI_LIVE_TOKEN }}
+          QCLI_FLIGHT_TARGET: ${{ matrix.target }}
+          QCLI_FLIGHT_QUERY: SELECT 1 AS qcli_m19_value
+          QCLI_FLIGHT_EXPECTED_ROWS: "1"
+          QCLI_FLIGHT_TEST_PREPARED: "false"
+      - name: Java ADBC
+        run: mvn -q -f conformance/m19/java/pom.xml compile exec:java -Dexec.mainClass=org.apache.qcli.AdbcProfile
+        env:
+          QCLI_FLIGHT_TOKEN: ${{ secrets.QCLI_LIVE_TOKEN }}
+          QCLI_FLIGHT_TARGET: ${{ matrix.target }}
+          QCLI_FLIGHT_QUERY: SELECT 1 AS qcli_m19_value
+          QCLI_FLIGHT_EXPECTED_ROWS: "1"
+          MAVEN_OPTS: --add-opens=java.base/java.nio=ALL-UNNAMED
+      - name: ConfluxQuery JDBC
+        run: mvn -B -q -f conformance/m25/java/pom.xml compile exec:java -Dexec.mainClass=in.confluxdata.query.jdbc.ConformanceProfile
+        env:
+          QCLI_FLIGHT_TOKEN: ${{ secrets.QCLI_LIVE_TOKEN }}
+          QCLI_FLIGHT_TARGET: ${{ matrix.target }}
+          QCLI_FLIGHT_QUERY: SELECT 1 AS qcli_m25_value
+          QCLI_FLIGHT_EXPECTED_ROWS: "1"
+          QCLI_JDBC_EXTENDED: "false"
+          MAVEN_OPTS: --add-opens=java.base/java.nio=ALL-UNNAMED
+      - name: Rust ADBC C driver manager
+        run: cargo run --locked --manifest-path conformance/m19/rust/Cargo.toml
+        env:
+          QCLI_FLIGHT_TOKEN: ${{ secrets.QCLI_LIVE_TOKEN }}
+          QCLI_FLIGHT_TARGET: ${{ matrix.target }}
+          QCLI_FLIGHT_QUERY: SELECT 1 AS qcli_m19_value
+          QCLI_FLIGHT_EXPECTED_ROWS: "1"
+          QCLI_FLIGHT_TEST_PREPARED: "false"
+      - name: Stop gateway
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f /tmp/qcli-live-server.pid ]]; then kill "$(cat /tmp/qcli-live-server.pid)" || true; fi
+          cat /tmp/qcli-live-server.log || true

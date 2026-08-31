@@ -1,0 +1,24 @@
+# Replace these values with the exact issuer and audience in tokens accepted by qcli.
+issuer = "https://identity.example.com/"
+audiences = ["qcli"]
+# Relative paths are resolved from this file. Refresh this file atomically when
+# the issuer rotates keys; qcli reloads changed JWKS before authentication.
+jwks_file = "identity-example-jwks.json"
+algorithms = ["RS256"]
+groups_claim = "groups"
+clock_skew_seconds = 30
+
+[defaults]
+targets = []
+max_sessions = 2
+max_concurrent_queries = 1
+
+[group_policies.qcli-analysts]
+targets = ["trino-prod", "databricks-prod"]
+max_sessions = 8
+max_concurrent_queries = 4
+
+[group_policies.qcli-finance]
+targets = ["snowflake-prod"]
+max_sessions = 4
+max_concurrent_queries = 2

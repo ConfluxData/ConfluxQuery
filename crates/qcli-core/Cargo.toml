@@ -1,0 +1,22 @@
+[package]
+name = "qcli-core"
+description = "Session and query orchestration for qcli"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+arrow-array.workspace = true
+chrono.workspace = true
+qcli-config = { version = "0.1.0", path = "../qcli-config" }
+qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
+serde.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+qcli-driver-demo = { version = "0.1.0", path = "../qcli-driver-demo" }
+qcli-output = { version = "0.1.0", path = "../qcli-output" }
+
+[lints]
+workspace = true
