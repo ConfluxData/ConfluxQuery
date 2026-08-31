@@ -1,8 +1,8 @@
 site_name: ConfluxQuery
 site_description: ConfluxQuery CLI and Gateway for Trino, Databricks SQL, and Snowflake
-site_url: https://deepakdixit.github.io/qcli/
-repo_url: https://github.com/deepakdixit/qcli
-repo_name: deepakdixit/qcli
+site_url: https://confluxdata.github.io/ConfluxQuery/
+repo_url: https://github.com/ConfluxData/ConfluxQuery
+repo_name: ConfluxData/ConfluxQuery
 edit_uri: edit/main/docs/
 copyright: ConfluxQuery by ConfluxData &middot; Copyright &copy; contributors
 

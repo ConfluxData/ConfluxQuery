@@ -77,9 +77,10 @@ Start ConfluxQuery Gateway with `qcli serve`.
 - Use **ConfluxQuery Gateway** for server mode, HTTP, Flight SQL, shared
   service operation, and cluster deployment.
 - Use **ConfluxData** when naming the publisher.
-- Use `qcli` only for the executable, repository, packages, technical
-  identifiers, configuration, protocol contracts, code symbols, and literal
-  commands.
+- Use `qcli` only for the executable, packages, technical identifiers,
+  configuration, protocol contracts, code symbols, and literal commands.
+- Use **ConfluxQuery** for the public repository name. A local source directory
+  may still be named `qcli`; that directory name is not part of the brand.
 - On first mention in an introductory page, establish that ConfluxQuery is
   distributed as the `qcli` command.
 
@@ -105,7 +106,8 @@ Branding must not rename or alias these interfaces:
 |---|---|
 | Binary and shell command | `qcli` |
 | Serve subcommand | `qcli serve` |
-| Repository | `qcli` |
+| GitHub repository | `ConfluxData/ConfluxQuery` |
+| Local source directory | `qcli` or `ConfluxQuery` (not a public contract) |
 | Rust package/crate prefix | `qcli`, `qcli-*` |
 | Configuration directory | `~/.qcli/` |
 | Default configuration | `~/.qcli/.env` |

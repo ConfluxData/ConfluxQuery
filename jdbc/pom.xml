@@ -25,9 +25,9 @@
     </developer>
   </developers>
   <scm>
-    <connection>scm:git:https://github.com/deepakddixit/qcli.git</connection>
-    <developerConnection>scm:git:ssh://git@github.com/deepakddixit/qcli.git</developerConnection>
-    <url>https://github.com/deepakddixit/qcli</url>
+    <connection>scm:git:https://github.com/ConfluxData/ConfluxQuery.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/ConfluxData/ConfluxQuery.git</developerConnection>
+    <url>https://github.com/ConfluxData/ConfluxQuery</url>
     <tag>HEAD</tag>
   </scm>
 

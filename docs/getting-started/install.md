@@ -29,8 +29,8 @@ is unavailable. Verification details and provenance expectations are in the
 The repository pins its Rust toolchain:
 
 ```bash
-git clone https://github.com/deepakdixit/qcli.git
-cd qcli
+git clone https://github.com/ConfluxData/ConfluxQuery.git
+cd ConfluxQuery
 cargo build --release --locked -p qcli
 ./target/release/qcli --version
 ```
