@@ -63,7 +63,7 @@ Benefits:
 
 Costs:
 
-- qcli depends on the client's release compatibility and Rust 1.86 MSRV.
+- qcli depends on the client's release compatibility and the current Rust 1.89 MSRV.
 - Authentication methods beyond Basic and bearer/JWT need later additions.
 - The spooling protocol needs a separate future implementation.
 - Response-session mutations are retained inside the client; exposing a session

@@ -36,7 +36,7 @@ dispatches. It verifies:
 - formatting, Clippy with warnings denied, and rustdoc warnings;
 - the complete workspace test suite on Linux, macOS ARM64, and Windows;
 - release-mode binary build and installed-binary smoke commands;
-- the declared Rust 1.86 minimum version;
+- the declared Rust 1.89 minimum version;
 - RustSec dependency advisories.
 
 Live engine conformance remains a separately approved pre-release operation

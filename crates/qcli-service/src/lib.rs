@@ -209,9 +209,7 @@ impl ResultBatchReader {
                 batches.next().transpose().map_err(storage_service_error)?
             }
         };
-        if batch.is_some()
-            && let Some(remaining) = &mut self.remaining
-        {
+        if let (Some(_), Some(remaining)) = (batch.as_ref(), self.remaining.as_mut()) {
             *remaining -= 1;
         }
         Ok(batch)
@@ -675,10 +673,14 @@ impl GatewayService {
             if matches!(status.state.as_str(), "completed" | "failed" | "cancelled") {
                 let mut result_key = None;
                 let mut batch_count = 0;
-                if status.state == "completed"
-                    && let Ok(mut reader) = self.result_reader(&principal, &query_id)
-                    && let Ok((bytes, batches)) = encode_reader(&mut reader)
-                {
+                let retained_result = if status.state == "completed" {
+                    self.result_reader(&principal, &query_id)
+                        .ok()
+                        .and_then(|mut reader| encode_reader(&mut reader).ok())
+                } else {
+                    None
+                };
+                if let Some((bytes, batches)) = retained_result {
                     let key = format!(
                         "{}/{}.arrow",
                         principal_object_prefix(&principal.id),
@@ -2409,9 +2411,10 @@ fn record_event(record: &QueryRecord, event: QueryEvent) {
 fn push_event(record: &QueryRecord, event: &str, value: Value, terminal: bool) {
     let entry = {
         let mut data = record.data.lock().expect("query record mutex poisoned");
-        if event == "state"
-            && let Some(state) = value.get("state").and_then(Value::as_str)
-        {
+        let state = (event == "state")
+            .then(|| value.get("state").and_then(Value::as_str))
+            .flatten();
+        if let Some(state) = state {
             data.state = state.into();
             if terminal {
                 data.completed_at = Some(Instant::now());
@@ -2610,9 +2613,11 @@ fn store_batch(
 
 fn finish_results(record: &QueryRecord) -> Result<(), QueryError> {
     let mut data = record.data.lock().expect("query record mutex poisoned");
-    if let ResultStorage::Spill { writer, .. } = &mut data.storage
-        && let Some(mut writer) = writer.take()
-    {
+    let writer = match &mut data.storage {
+        ResultStorage::Spill { writer, .. } => writer.take(),
+        ResultStorage::Memory(_) => None,
+    };
+    if let Some(mut writer) = writer {
         writer.finish().map_err(storage_error)?;
     }
     Ok(())

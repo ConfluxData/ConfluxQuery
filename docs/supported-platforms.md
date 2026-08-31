@@ -11,7 +11,9 @@
 | Windows | x86-64 | `x86_64-pc-windows-msvc` | `.zip` |
 | OCI container | Linux x86-64 | `linux/amd64` | `.oci.tar.gz` |
 
-Rust 1.86 is the minimum supported toolchain for source builds.
+Rust 1.89 is the minimum supported toolchain for source builds. This baseline
+matches the standard-library file-lock API required by the interactive client
+dependency set.
 
 ## Initial engine/client matrix
 

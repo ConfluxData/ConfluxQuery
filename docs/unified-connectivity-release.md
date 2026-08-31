@@ -27,7 +27,7 @@ than implying certification.
 ## Evidence layers
 
 - Every pull request: format, strict Clippy, rustdoc, workspace tests on Linux,
-  macOS, and Windows, Rust 1.86, RustSec, clean ADBC/JDBC clients, PostgreSQL HA,
+  macOS, and Windows, Rust 1.89, RustSec, clean ADBC/JDBC clients, PostgreSQL HA,
   million-row streaming, release archive, and OCI image smoke tests.
 - Protected live workflow: pinned ADBC clients against Trino, Databricks SQL,
   and Snowflake using repository secrets.

@@ -31,7 +31,7 @@ jobs:
       version: ${{ steps.identity.outputs.version }}
       prerelease: ${{ steps.identity.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
       - id: identity
@@ -88,7 +88,7 @@ jobs:
             archive: zip
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.validate.outputs.tag }}
       - uses: houseabsolute/actions-rust-cross@v1
@@ -116,7 +116,7 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.validate.outputs.tag }}
       - uses: actions/setup-java@v5
@@ -150,7 +150,7 @@ jobs:
     needs: [validate, build, jdbc]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.validate.outputs.tag }}
       - uses: actions/download-artifact@v4
@@ -262,7 +262,7 @@ jobs:
           --health-cmd "pg_isready -U postgres -d qcli_test"
           --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.validate.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
@@ -278,7 +278,7 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.validate.outputs.tag }}
       - name: Build and smoke image
@@ -305,7 +305,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.validate.outputs.tag }}
       - uses: actions/download-artifact@v4

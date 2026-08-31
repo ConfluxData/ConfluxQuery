@@ -357,9 +357,13 @@ fn choose_target(
     }
     loop {
         let answer = editor.readline("target> ")?;
-        if let Ok(index) = answer.trim().parse::<usize>()
-            && let Some(target) = index.checked_sub(1).and_then(|index| targets.get(index))
-        {
+        let numbered_target = answer
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| index.checked_sub(1))
+            .and_then(|index| targets.get(index));
+        if let Some(target) = numbered_target {
             return Ok((*target).clone());
         }
         if let Some(target) = config.target(answer.trim()) {

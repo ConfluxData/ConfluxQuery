@@ -272,9 +272,10 @@ impl EngineAdapter for DemoAdapter {
                 ));
             }
             Some(existing) if request.if_exists == IngestTableExists::Append => {
-                if let (Some(existing), Some(incoming)) = (existing.first(), incoming.first())
-                    && existing.schema() != incoming.schema()
-                {
+                if matches!(
+                    (existing.first(), incoming.first()),
+                    (Some(existing), Some(incoming)) if existing.schema() != incoming.schema()
+                ) {
                     return Err(DriverError::new(
                         "ingest_schema_mismatch",
                         "append schema does not match the ingestion target",

@@ -280,7 +280,11 @@ fn milestone_four_reserves_exit_four_for_connection_failures() {
     );
     let output = qcli(&path, &["target", "test", "trino"]);
     assert_eq!(output.status.code(), Some(4));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("connection"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("driver error:"),
+        "unexpected stderr: {stderr}"
+    );
     let _ = fs::remove_file(path);
 }
 

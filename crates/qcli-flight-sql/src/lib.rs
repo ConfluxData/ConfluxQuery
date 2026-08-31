@@ -364,66 +364,18 @@ impl QcliFlightSql {
         &self,
         request: &Request<Action>,
     ) -> Result<Response<<Self as FlightService>::DoActionStream>, Status> {
-        use session_proto::{
-            SetSessionOptionError, SetSessionOptionErrorValue, SetSessionOptionsRequest,
-            SetSessionOptionsResult,
-        };
+        use session_proto::{SetSessionOptionsRequest, SetSessionOptionsResult};
 
         let principal = required_principal(request)?.clone();
         let current = self.session_from_request(request, &principal).await?;
         let input = SetSessionOptionsRequest::decode(request.get_ref().body.as_ref())
             .map_err(|_| Status::invalid_argument("SetSessionOptions body is malformed"))?;
-        let mut target = None;
-        let mut overrides = BTreeMap::new();
-        let mut errors = std::collections::HashMap::new();
-        for (name, value) in input.session_options {
-            if matches!(name.as_str(), "qcli.version" | "qcli.session_id") {
-                errors.insert(
-                    name,
-                    SetSessionOptionError {
-                        value: SetSessionOptionErrorValue::InvalidName as i32,
-                    },
-                );
-                continue;
-            }
-            let Some(value) = session_option_string(value) else {
-                errors.insert(
-                    name,
-                    SetSessionOptionError {
-                        value: SetSessionOptionErrorValue::InvalidValue as i32,
-                    },
-                );
-                continue;
-            };
-            if name == "qcli.target" {
-                match value {
-                    ParsedSessionOption::Value(value) if !value.is_empty() => target = Some(value),
-                    _ => {
-                        errors.insert(
-                            name,
-                            SetSessionOptionError {
-                                value: SetSessionOptionErrorValue::InvalidValue as i32,
-                            },
-                        );
-                    }
-                }
-            } else if let Some(property) = session_property_name(&name) {
-                overrides.insert(
-                    property,
-                    match value {
-                        ParsedSessionOption::Unset => None,
-                        ParsedSessionOption::Value(value) => Some(value),
-                    },
-                );
-            } else {
-                errors.insert(
-                    name,
-                    SetSessionOptionError {
-                        value: SetSessionOptionErrorValue::InvalidName as i32,
-                    },
-                );
-            }
-        }
+        let parsed = parse_set_session_options(input.session_options);
+        let metadata_target = request
+            .metadata()
+            .get("qcli-target")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty());
 
         let snapshot = if let Some(current) = current {
             self.gateway
@@ -431,21 +383,15 @@ impl QcliFlightSql {
                     &principal,
                     &current.session_id,
                     current.session_version,
-                    target.as_deref(),
-                    overrides,
+                    parsed.target.as_deref(),
+                    parsed.overrides,
                 )
                 .await
                 .map_err(service_error_status)?
         } else {
-            let target = target
-                .or_else(|| {
-                    request
-                        .metadata()
-                        .get("qcli-target")
-                        .and_then(|value| value.to_str().ok())
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_owned)
-                })
+            let target = parsed
+                .target
+                .or_else(|| metadata_target.map(str::to_owned))
                 .ok_or_else(|| {
                     Status::invalid_argument(
                         "qcli.target option or qcli-target metadata is required when creating a Flight session",
@@ -455,7 +401,8 @@ impl QcliFlightSql {
                 .create_session_clustered(
                     &principal,
                     &target,
-                    overrides
+                    parsed
+                        .overrides
                         .into_iter()
                         .filter_map(|(name, value)| value.map(|value| (name, value)))
                         .collect(),
@@ -463,8 +410,12 @@ impl QcliFlightSql {
                 .await
                 .map_err(service_error_status)?
         };
-        let mut response =
-            action_result_response(SetSessionOptionsResult { errors }.encode_to_vec());
+        let mut response = action_result_response(
+            SetSessionOptionsResult {
+                errors: parsed.errors,
+            }
+            .encode_to_vec(),
+        );
         self.set_session_cookie(&mut response, &principal, &snapshot)?;
         Ok(response)
     }
@@ -2292,6 +2243,75 @@ fn action_result_response(body: Vec<u8>) -> Response<ActionStream> {
 enum ParsedSessionOption {
     Unset,
     Value(String),
+}
+
+struct ParsedSetSessionOptions {
+    target: Option<String>,
+    overrides: BTreeMap<String, Option<String>>,
+    errors: std::collections::HashMap<String, session_proto::SetSessionOptionError>,
+}
+
+fn parse_set_session_options(
+    options: std::collections::HashMap<String, session_proto::SessionOptionValue>,
+) -> ParsedSetSessionOptions {
+    use session_proto::{SetSessionOptionError, SetSessionOptionErrorValue};
+
+    let mut parsed = ParsedSetSessionOptions {
+        target: None,
+        overrides: BTreeMap::new(),
+        errors: std::collections::HashMap::new(),
+    };
+    for (name, value) in options {
+        if matches!(name.as_str(), "qcli.version" | "qcli.session_id") {
+            parsed.errors.insert(
+                name,
+                SetSessionOptionError {
+                    value: SetSessionOptionErrorValue::InvalidName as i32,
+                },
+            );
+            continue;
+        }
+        let Some(value) = session_option_string(value) else {
+            parsed.errors.insert(
+                name,
+                SetSessionOptionError {
+                    value: SetSessionOptionErrorValue::InvalidValue as i32,
+                },
+            );
+            continue;
+        };
+        if name == "qcli.target" {
+            match value {
+                ParsedSessionOption::Value(value) if !value.is_empty() => {
+                    parsed.target = Some(value);
+                }
+                _ => {
+                    parsed.errors.insert(
+                        name,
+                        SetSessionOptionError {
+                            value: SetSessionOptionErrorValue::InvalidValue as i32,
+                        },
+                    );
+                }
+            }
+        } else if let Some(property) = session_property_name(&name) {
+            parsed.overrides.insert(
+                property,
+                match value {
+                    ParsedSessionOption::Unset => None,
+                    ParsedSessionOption::Value(value) => Some(value),
+                },
+            );
+        } else {
+            parsed.errors.insert(
+                name,
+                SetSessionOptionError {
+                    value: SetSessionOptionErrorValue::InvalidName as i32,
+                },
+            );
+        }
+    }
+    parsed
 }
 
 fn session_option_string(value: session_proto::SessionOptionValue) -> Option<ParsedSessionOption> {
