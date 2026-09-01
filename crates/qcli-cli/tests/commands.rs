@@ -10,6 +10,13 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(unix)]
 static PTY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[cfg(unix)]
+fn lock_pty_tests() -> std::sync::MutexGuard<'static, ()> {
+    PTY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn config_file(contents: &str) -> PathBuf {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("qcli-cli-{}-{id}.env", std::process::id()));
@@ -308,7 +315,7 @@ fn milestone_two_surfaces_structured_demo_failure() {
 fn milestone_five_interactive_flow_runs_in_a_pseudo_terminal() {
     use expectrl::{Eof, Expect, Session};
 
-    let _pty_guard = PTY_TEST_LOCK.lock().expect("PTY test lock poisoned");
+    let _pty_guard = lock_pty_tests();
     let path = config_file(
         "[default]\ndecimal_places=3\nstring_truncate=12\ntiming=true\n\n[other]\nengine=demo\n\n[demo]\nengine=demo\n",
     );
@@ -345,7 +352,7 @@ fn milestone_five_interactive_flow_runs_in_a_pseudo_terminal() {
 fn milestone_five_ctrl_c_cancels_query_without_exiting_shell() {
     use expectrl::{ControlCode, Eof, Expect, Session};
 
-    let _pty_guard = PTY_TEST_LOCK.lock().expect("PTY test lock poisoned");
+    let _pty_guard = lock_pty_tests();
     let path = config_file("[demo]\nengine=demo\n");
     let mut command = Command::new(env!("CARGO_BIN_EXE_qcli"));
     command
@@ -387,7 +394,7 @@ fn milestone_nine_reports_capabilities_without_connecting() {
 fn milestone_six_navigation_and_atomic_target_switch_run_in_a_pseudo_terminal() {
     use expectrl::{Eof, Expect, Session};
 
-    let _pty_guard = PTY_TEST_LOCK.lock().expect("PTY test lock poisoned");
+    let _pty_guard = lock_pty_tests();
     let path = config_file("[demo]\nengine=demo\n\n[other]\nengine=demo\n");
     let mut command = Command::new(env!("CARGO_BIN_EXE_qcli"));
     command
