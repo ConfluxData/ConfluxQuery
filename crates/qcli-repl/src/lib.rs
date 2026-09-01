@@ -196,6 +196,18 @@ pub async fn run(
         candidates: Arc::clone(&completion_candidates),
     }));
     let (interrupt_tx, mut interrupts) = tokio::sync::mpsc::channel(8);
+    #[cfg(unix)]
+    {
+        let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        tokio::spawn(async move {
+            while signal.recv().await.is_some() {
+                if interrupt_tx.send(()).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    #[cfg(not(unix))]
     tokio::spawn(async move {
         loop {
             if tokio::signal::ctrl_c().await.is_err() || interrupt_tx.send(()).await.is_err() {
@@ -203,7 +215,6 @@ pub async fn run(
             }
         }
     });
-    tokio::task::yield_now().await;
     let target = choose_target(config, requested_target, &mut editor)?;
     extend_completions(
         &completion_candidates,
