@@ -43,7 +43,7 @@ jobs:
             exit 1
           }
           version="${tag#v}"
-          cargo_version="$(sed -n 's/^version = \"\\([^\"]*\\)\"/\\1/p' Cargo.toml | head -1)"
+          cargo_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
           base_version="${version%%-rc.*}"
           [[ "$cargo_version" == "$base_version" ]] || {
             echo "tag $tag does not match workspace version $cargo_version" >&2
