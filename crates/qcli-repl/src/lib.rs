@@ -719,14 +719,6 @@ async fn execute(
     timing: bool,
     interrupts: &mut tokio::sync::mpsc::Receiver<()>,
 ) -> Result<ExecutionOutcome, ReplError> {
-    #[cfg(unix)]
-    let (interrupt_flag, _signal_registration) = {
-        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let id = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag))?;
-        (flag, SignalRegistration(id))
-    };
-    #[cfg(not(unix))]
-    let interrupt_flag = ();
     let started = Instant::now();
     let options = DisplayOptions {
         decimal_places: option(&snapshot, "decimal_places", 3),
@@ -754,11 +746,6 @@ async fn execute(
                 cancelled = true;
                 eprintln!("Cancelling query {query_id}...");
             }
-            () = wait_for_interrupt(&interrupt_flag), if !cancelled => {
-                handle.cancel();
-                cancelled = true;
-                eprintln!("Cancelling query {query_id}...");
-            }
         }
     }
     let rows = output.finish()?;
@@ -780,31 +767,10 @@ async fn execute(
     })
 }
 
+#[derive(Debug)]
 struct ExecutionOutcome {
     status: String,
     session_properties: BTreeMap<String, String>,
-}
-
-#[cfg(unix)]
-struct SignalRegistration(signal_hook::SigId);
-
-#[cfg(unix)]
-impl Drop for SignalRegistration {
-    fn drop(&mut self) {
-        signal_hook::low_level::unregister(self.0);
-    }
-}
-
-#[cfg(unix)]
-async fn wait_for_interrupt(flag: &std::sync::atomic::AtomicBool) {
-    while !flag.load(std::sync::atomic::Ordering::Relaxed) {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-}
-
-#[cfg(not(unix))]
-async fn wait_for_interrupt(_flag: &()) {
-    std::future::pending().await
 }
 
 fn statement_complete(sql: &str) -> bool {
@@ -901,6 +867,7 @@ pub fn history_path(config_path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qcli_driver_demo::DemoAdapter;
 
     #[test]
     fn multiline_boundary_ignores_semicolons_inside_quotes() {
@@ -938,5 +905,37 @@ mod tests {
         assert_eq!(start, 0);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].replacement, "event_summary");
+    }
+
+    #[tokio::test]
+    async fn injected_interrupt_cancels_the_active_query() {
+        let adapters: Vec<Arc<dyn EngineAdapter>> = vec![Arc::new(DemoAdapter)];
+        let service = QueryService::new(adapters, 8);
+        let snapshot = SessionSnapshot {
+            id: "injected-interrupt".into(),
+            version: 1,
+            target: "demo".into(),
+            engine: "demo".into(),
+            properties: BTreeMap::new(),
+            overrides: BTreeMap::new(),
+        };
+        let (interrupt_tx, mut interrupts) = tokio::sync::mpsc::channel(1);
+        interrupt_tx.send(()).await.unwrap();
+
+        let error = execute(
+            &service,
+            snapshot,
+            "wait-for-cancel".into(),
+            OutputFormat::Table,
+            false,
+            &mut interrupts,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ReplError::Core(CoreError::Driver(driver)) if driver.code == "cancelled"
+        ));
     }
 }

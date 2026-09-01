@@ -13,8 +13,10 @@ qcli-driver-api = { version = "0.1.0", path = "../qcli-driver-api" }
 qcli-metadata = { version = "0.1.0", path = "../qcli-metadata" }
 qcli-output = { version = "0.1.0", path = "../qcli-output" }
 rustyline.workspace = true
-signal-hook.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+qcli-driver-demo = { version = "0.1.0", path = "../qcli-driver-demo" }
 
 [lints]
 workspace = true
