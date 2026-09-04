@@ -76,7 +76,35 @@ The release workflow rejects a tag whose base version differs from
 6. creates GitHub artifact provenance attestations;
 7. builds and smoke-tests a non-root Linux AMD64 OCI server archive;
 8. runs packaged HTTP, ADBC, JDBC, HA, and bounded-load profiles;
-9. publishes a GitHub prerelease or stable release.
+9. publishes a GitHub prerelease or stable release;
+10. loads the already smoke-tested OCI archive and publishes it to GitHub
+    Container Registry.
+
+Container images use the repository-scoped package name:
+
+```text
+ghcr.io/confluxdata/confluxquery:<version>
+ghcr.io/confluxdata/confluxquery:sha-<commit>
+```
+
+Stable releases also update `ghcr.io/confluxdata/confluxquery:latest`.
+Release candidates never update `latest`. The release job has only
+`packages: write` permission and uses the workflow's short-lived
+`GITHUB_TOKEN`; no registry password is required. The downloadable OCI archive
+remains attached to the GitHub release for offline and air-gapped use.
+
+Every native archive contains `RELEASE-METADATA.json`, the container exposes
+the same file at `/usr/share/doc/qcli/RELEASE-METADATA.json`, and a standalone
+copy is attached to the GitHub release. It records the product and executable,
+release version and tag, prerelease status, exact Git commit, UTC release time,
+GitHub release actor and profile, source repository, workflow run URL, and
+workflow attempt. This is the portable identity record; checksums, SBOMs,
+Sigstore bundles, and GitHub attestations provide the corresponding integrity
+and provenance evidence.
+
+After the first publication, confirm that the `confluxquery` package is public
+in the ConfluxData organization package settings and link it to the source
+repository if GitHub has not inferred the association from the OCI labels.
 
 The `github-release` environment should require approval for initial releases.
 

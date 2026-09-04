@@ -5,6 +5,38 @@ COPY . .
 RUN cargo build --locked --release -p qcli
 
 FROM debian:bookworm-slim
+ARG QCLI_VERSION=development
+ARG QCLI_REVISION=unknown
+ARG QCLI_RELEASED_AT=unknown
+ARG QCLI_RELEASED_BY=local
+ARG QCLI_RELEASE_TAG=unreleased
+ARG QCLI_PRERELEASE=false
+ARG QCLI_REPOSITORY=ConfluxData/ConfluxQuery
+ARG QCLI_WORKFLOW_RUN=local
+ARG QCLI_WORKFLOW_ATTEMPT=0
+LABEL org.opencontainers.image.title="ConfluxQuery Gateway" \
+      org.opencontainers.image.description="Multi-engine SQL CLI and governed query gateway" \
+      org.opencontainers.image.source="https://github.com/ConfluxData/ConfluxQuery" \
+      org.opencontainers.image.documentation="https://confluxdata.github.io/ConfluxQuery/" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${QCLI_VERSION}"
+RUN install -d /usr/share/doc/qcli \
+    && printf '%s\n' \
+      '{' \
+      '  "schema_version": 1,' \
+      '  "product": "ConfluxQuery",' \
+      '  "executable": "qcli",' \
+      "  \"version\": \"${QCLI_VERSION}\"," \
+      "  \"tag\": \"${QCLI_RELEASE_TAG}\"," \
+      "  \"prerelease\": ${QCLI_PRERELEASE}," \
+      "  \"git_commit\": \"${QCLI_REVISION}\"," \
+      "  \"released_at\": \"${QCLI_RELEASED_AT}\"," \
+      "  \"released_by\": {\"login\": \"${QCLI_RELEASED_BY}\", \"profile\": \"https://github.com/${QCLI_RELEASED_BY}\"}," \
+      "  \"repository\": \"${QCLI_REPOSITORY}\"," \
+      "  \"workflow_run\": \"${QCLI_WORKFLOW_RUN}\"," \
+      "  \"workflow_attempt\": ${QCLI_WORKFLOW_ATTEMPT}" \
+      '}' \
+      > /usr/share/doc/qcli/RELEASE-METADATA.json
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

@@ -41,9 +41,14 @@ The OCI image runs as UID/GID 10001 and contains the same server-capable
 binary:
 
 ```bash
-docker build -t qcli:local .
-docker run --rm qcli:local --version
+docker pull ghcr.io/confluxdata/confluxquery:0.1.0
+docker run --rm ghcr.io/confluxdata/confluxquery:0.1.0 --version
 ```
+
+Stable and release-candidate images are published to GitHub Container Registry.
+Pin production deployments to an explicit version rather than `latest`. The
+OCI archive attached to each GitHub release remains available for offline
+loading. Source builds can still use `docker build -t qcli:local .`.
 
 Mount configuration and authentication files read-only when serving. Never
 bake credentials into an image layer.
