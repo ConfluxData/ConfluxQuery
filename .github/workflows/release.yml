@@ -30,6 +30,8 @@ jobs:
       tag: ${{ steps.identity.outputs.tag }}
       version: ${{ steps.identity.outputs.version }}
       prerelease: ${{ steps.identity.outputs.prerelease }}
+      revision: ${{ steps.identity.outputs.revision }}
+      released_at: ${{ steps.identity.outputs.released_at }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -51,11 +53,43 @@ jobs:
           }
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "released_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           if [[ "$tag" == *-rc.* ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
+      - name: Generate release metadata
+        shell: bash
+        env:
+          TAG: ${{ steps.identity.outputs.tag }}
+          VERSION: ${{ steps.identity.outputs.version }}
+          REVISION: ${{ steps.identity.outputs.revision }}
+          RELEASED_AT: ${{ steps.identity.outputs.released_at }}
+          PRERELEASE: ${{ steps.identity.outputs.prerelease }}
+        run: |
+          mkdir -p release-metadata
+          jq --null-input \
+            --arg product "ConfluxQuery" \
+            --arg executable "qcli" \
+            --arg version "$VERSION" \
+            --arg tag "$TAG" \
+            --arg revision "$REVISION" \
+            --arg released_at "$RELEASED_AT" \
+            --arg released_by "$GITHUB_ACTOR" \
+            --arg released_by_url "${GITHUB_SERVER_URL}/${GITHUB_ACTOR}" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflow_run "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --argjson workflow_attempt "$GITHUB_RUN_ATTEMPT" \
+            --argjson prerelease "$PRERELEASE" \
+            '{schema_version: 1, product: $product, executable: $executable, version: $version, tag: $tag, prerelease: $prerelease, git_commit: $revision, released_at: $released_at, released_by: {login: $released_by, profile: $released_by_url}, repository: $repository, workflow_run: $workflow_run, workflow_attempt: $workflow_attempt}' \
+            > release-metadata/RELEASE-METADATA.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-metadata
+          path: release-metadata/RELEASE-METADATA.json
+          if-no-files-found: error
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
@@ -97,14 +131,18 @@ jobs:
           target: ${{ matrix.target }}
           args: --locked --release -p qcli
           strip: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-metadata
+          path: release-metadata
       - name: Package Unix archive
         if: matrix.archive == 'tar.gz'
         shell: bash
-        run: bash scripts/package-release.sh "${{ matrix.target }}" "${{ needs.validate.outputs.version }}"
+        run: bash scripts/package-release.sh "${{ matrix.target }}" "${{ needs.validate.outputs.version }}" release-metadata/RELEASE-METADATA.json
       - name: Package Windows archive
         if: matrix.archive == 'zip'
         shell: pwsh
-        run: scripts/package-release.ps1 "${{ matrix.target }}" "${{ needs.validate.outputs.version }}"
+        run: scripts/package-release.ps1 "${{ matrix.target }}" "${{ needs.validate.outputs.version }}" release-metadata/RELEASE-METADATA.json
       - uses: actions/upload-artifact@v4
         with:
           name: qcli-${{ matrix.target }}
@@ -283,8 +321,22 @@ jobs:
           ref: ${{ needs.validate.outputs.tag }}
       - name: Build and smoke image
         run: |
-          docker build --tag qcli:${{ needs.validate.outputs.version }} .
+          docker build \
+            --build-arg QCLI_VERSION=${{ needs.validate.outputs.version }} \
+            --build-arg QCLI_REVISION=${{ needs.validate.outputs.revision }} \
+            --build-arg QCLI_RELEASED_AT=${{ needs.validate.outputs.released_at }} \
+            --build-arg QCLI_RELEASED_BY=${{ github.actor }} \
+            --build-arg QCLI_RELEASE_TAG=${{ needs.validate.outputs.tag }} \
+            --build-arg QCLI_PRERELEASE=${{ needs.validate.outputs.prerelease }} \
+            --build-arg QCLI_REPOSITORY=${{ github.repository }} \
+            --build-arg QCLI_WORKFLOW_RUN=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} \
+            --build-arg QCLI_WORKFLOW_ATTEMPT=${{ github.run_attempt }} \
+            --label org.opencontainers.image.revision=${{ needs.validate.outputs.revision }} \
+            --label org.opencontainers.image.created=${{ needs.validate.outputs.released_at }} \
+            --tag qcli:${{ needs.validate.outputs.version }} .
           docker run --rm qcli:${{ needs.validate.outputs.version }} --version
+          docker run --rm --entrypoint cat qcli:${{ needs.validate.outputs.version }} \
+            /usr/share/doc/qcli/RELEASE-METADATA.json
       - name: Export OCI image archive
         run: |
           mkdir -p dist
@@ -314,7 +366,7 @@ jobs:
           merge-multiple: true
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum qcli-* confluxquery-jdbc-* > SHA256SUMS
+        run: sha256sum qcli-* confluxquery-jdbc-* RELEASE-METADATA.json > SHA256SUMS
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@v0
         with:
@@ -328,6 +380,7 @@ jobs:
             dist/qcli-*.tar.gz
             dist/qcli-*.zip
             dist/confluxquery-jdbc-*.jar
+            dist/RELEASE-METADATA.json
       - uses: sigstore/cosign-installer@v3
       - name: Sign release files with GitHub OIDC
         working-directory: dist
@@ -347,10 +400,49 @@ jobs:
           if [[ "$PRERELEASE" == "true" ]]; then options+=(--prerelease); fi
           gh release create "$TAG" dist/* "${options[@]}"
 
+  publish-container:
+    name: Publish server image to GHCR
+    needs: [validate, container, publish-github]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: qcli-container
+          path: dist
+      - name: Load tested release image
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: gunzip --stdout "dist/qcli-${VERSION}-linux-amd64.oci.tar.gz" | docker load
+      - name: Log in to GitHub Container Registry
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Publish release tags
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+          REVISION: ${{ needs.validate.outputs.revision }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          source="qcli:${VERSION}"
+          tags=("${VERSION}" "sha-${REVISION}")
+          if [[ "$PRERELEASE" == "false" ]]; then tags+=(latest); fi
+
+          for tag in "${tags[@]}"; do
+            docker tag "$source" "${image}:${tag}"
+            docker push "${image}:${tag}"
+          done
+
   dispatch-stable-publication:
     name: Dispatch stable package publication
     if: needs.validate.outputs.prerelease == 'false'
-    needs: [validate, publish-github]
+    needs: [validate, publish-github, publish-container]
     runs-on: ubuntu-latest
     permissions:
       actions: write

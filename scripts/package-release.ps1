@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Target,
-    [Parameter(Mandatory = $true)][string]$Version
+    [Parameter(Mandatory = $true)][string]$Version,
+    [Parameter(Mandatory = $false)][string]$Metadata
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,6 +15,10 @@ New-Item -ItemType Directory -Path (Join-Path $Stage "deploy") | Out-Null
 Copy-Item "target/$Target/release/qcli.exe" (Join-Path $Stage "qcli.exe")
 Copy-Item "README.md" (Join-Path $Stage "README.md")
 Copy-Item -Path @("LICENSE", "CHANGELOG.md") -Destination $Stage
+if ($Metadata) {
+    if (-not (Test-Path $Metadata)) { throw "Release metadata not found: $Metadata" }
+    Copy-Item $Metadata (Join-Path $Stage "RELEASE-METADATA.json")
+}
 Copy-Item -Path @("docs/connectivity-compatibility.md", "docs/enterprise-identity-and-transport.md", "docs/high-availability.md", "docs/operations.md", "docs/releasing.md", "docs/supported-platforms.md", "docs/unified-connectivity-release.md") -Destination (Join-Path $Stage "docs")
 Copy-Item -Path @("deploy/kubernetes", "deploy/systemd") -Destination (Join-Path $Stage "deploy") -Recurse
 (Get-Content "packaging/qcli.1") -replace "qcli 0\.1\.0", "qcli $Version" |
