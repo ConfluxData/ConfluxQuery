@@ -117,6 +117,10 @@ Stable releases dispatch `.github/workflows/publish-packages.yml`. The
 ENABLE_CRATES_IO_PUBLISH=true
 ```
 
+Crates.io publication is explicitly excluded from `v0.1.0`. Leave the variable
+unset or set it to `false` for that release. The guarded path remains available
+for a separately approved future release.
+
 Configure:
 
 - a protected `crates-io` GitHub environment;
@@ -145,7 +149,7 @@ propagates. Subsequent releases can dry-run every crate before publication.
 Configure:
 
 ```text
-Repository variable: HOMEBREW_TAP=OWNER/homebrew-tap
+Repository variable: HOMEBREW_TAP=ConfluxData/homebrew-tap
 Environment secret:  HOMEBREW_TAP_TOKEN=<fine-grained token>
 ```
 
@@ -156,20 +160,30 @@ it to the tap, and installs precompiled GitHub Release archives.
 Users then run:
 
 ```bash
-brew tap OWNER/tap
+brew tap confluxdata/tap
 brew install qcli
 ```
 
+## Maven Central
+
+Maven Central publication is explicitly excluded from `v0.1.0`. Leave
+`ENABLE_MAVEN_CENTRAL_PUBLISH` unset or set it to `false`. The JDBC artifacts
+remain attached to the GitHub release and the guarded Maven Central workflow is
+retained for a separately approved future release.
+
 ## Required GitHub setup
 
-This local checkout currently has no Git remote. After creating the repository:
+For a stable release from `ConfluxData/ConfluxQuery`:
 
-1. add and push the GitHub remote;
-2. configure branch protection and the three approval environments:
-   `github-release`, `crates-io`, and `homebrew`;
-3. configure the repository variables and secrets described above;
-4. confirm all desired crates.io names and tap ownership;
-5. run `workflow_dispatch` CI;
-6. create `v0.1.0-rc.1` before the first stable tag.
+1. confirm protected `main` is current and all required CI checks pass;
+2. configure the required approval environments:
+   `github-release` and `homebrew`, plus `crates-io` or `maven-central` only
+   when those publication channels are explicitly enabled;
+3. set `HOMEBREW_TAP=ConfluxData/homebrew-tap` and store the narrowly scoped
+   `HOMEBREW_TAP_TOKEN` in the `homebrew` environment;
+4. leave `ENABLE_CRATES_IO_PUBLISH` and
+   `ENABLE_MAVEN_CENTRAL_PUBLISH` unset or `false` for `v0.1.0`;
+5. run manual CI and live connectivity certification from `main`;
+6. create and push the signed stable tag only after those gates pass.
 
 No workflow publishes on an ordinary merge to `main`.
