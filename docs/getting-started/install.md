@@ -13,7 +13,7 @@ deployment manifests, and core operations documentation.
 ```bash
 sha256sum --check SHA256SUMS
 cosign verify-blob \
-  --bundle qcli-VERSION-PLATFORM.tar.gz.bundle \
+  --bundle qcli-VERSION-PLATFORM.tar.gz.sigstore.json \
   qcli-VERSION-PLATFORM.tar.gz
 tar -xzf qcli-VERSION-PLATFORM.tar.gz
 install -m 0755 qcli-VERSION-PLATFORM/qcli /usr/local/bin/qcli
@@ -23,6 +23,18 @@ qcli --version
 Use `shasum -a 256` on macOS and `Get-FileHash` on Windows when `sha256sum`
 is unavailable. Verification details and provenance expectations are in the
 [release guide](../releasing.md).
+
+## Homebrew
+
+Stable releases are available from the public ConfluxData tap:
+
+```bash
+brew tap confluxdata/tap
+brew install qcli
+qcli --version
+```
+
+Upgrade an existing installation with `brew update && brew upgrade qcli`.
 
 ## Build from source
 

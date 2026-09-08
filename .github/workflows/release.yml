@@ -447,7 +447,7 @@ jobs:
     permissions:
       actions: write
     steps:
-      - name: Start guarded crates.io and Homebrew workflow
+      - name: Start guarded package publication workflow
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.validate.outputs.tag }}
