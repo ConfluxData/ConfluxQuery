@@ -43,6 +43,7 @@ complete from workflow code alone.
 - [ ] 8. Run the complete GitHub CI workflow on `main` by manual dispatch;
       every supported `v...` release tag additionally runs mandatory live
       certification against pinned Trino 483 before publication.
+- [ ] 8. Run the complete GitHub CI workflow on `main` by manual dispatch.
 - [x] 9. Create and push the signed `v0.1.0-rc.1` tag from a verified `main`
       commit.
 - [ ] 10. Verify the RC GitHub release contains five native archives, JDBC
