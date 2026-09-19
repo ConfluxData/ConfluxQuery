@@ -23,6 +23,10 @@ dependency set.
 | Databricks SQL | qcli Statement Execution API adapter using `reqwest` | PAT |
 | Snowflake | `snowflakedb-rs` 1.1 | Username/password and programmatic access token through the password field |
 
-Live engine behavior is validated against configured test environments before a
-stable release. Exact server versions used for each release should be recorded
-in that release's notes.
+Every supported `v...` release tag runs publication-blocking live certification
+against the pinned `trinodb/trino:483` image. The profile covers the packaged
+CLI and Gateway through direct SQL, metadata, streaming, cancellation, HTTP,
+Flight SQL, Python/Go/Java/Rust ADBC, and the ConfluxQuery JDBC Driver.
+Databricks SQL and Snowflake remain manually validated for `v0.1.0`; their
+credentialed three-engine workflow can be run independently when protected
+test environments are available.
