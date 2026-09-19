@@ -76,8 +76,10 @@ The release workflow rejects a tag whose base version differs from
 6. creates GitHub artifact provenance attestations;
 7. builds and smoke-tests a non-root Linux AMD64 OCI server archive;
 8. runs packaged HTTP, ADBC, JDBC, HA, and bounded-load profiles;
-9. publishes a GitHub prerelease or stable release;
-10. loads the already smoke-tested OCI archive and publishes it to GitHub
+9. starts pinned Trino 483 and runs publication-blocking live CLI, driver,
+   Gateway, HTTP, Flight SQL, ADBC, and JDBC certification;
+10. publishes a GitHub prerelease or stable release;
+11. loads the already smoke-tested OCI archive and publishes it to GitHub
     Container Registry.
 
 Container images use the repository-scoped package name:

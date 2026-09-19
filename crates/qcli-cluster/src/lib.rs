@@ -771,7 +771,7 @@ mod tests {
     async fn expired_query_lease_fails_over_with_a_new_fencing_token() {
         let store = MemoryClusterStateStore::default();
         let first = store
-            .claim_query("query-1", "alice", "node-a", Duration::from_millis(1))
+            .claim_query("query-1", "alice", "node-a", Duration::from_secs(1))
             .await
             .unwrap();
         assert_eq!(
@@ -782,7 +782,14 @@ mod tests {
                 .code,
             "lease_held"
         );
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        store
+            .state
+            .lock()
+            .expect("memory cluster lock poisoned")
+            .leases
+            .get_mut("query-1")
+            .expect("query lease exists")
+            .lease_expires_at = Utc::now() - chrono::Duration::seconds(1);
         let second = store
             .claim_query("query-1", "alice", "node-b", Duration::from_secs(1))
             .await

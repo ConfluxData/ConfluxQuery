@@ -20,6 +20,8 @@ All notable qcli changes are documented here. qcli follows semantic versioning.
   plus `latest` for stable releases.
 - Portable release metadata containing the version, tag, exact Git commit, UTC
   release time, release actor, source repository, and workflow identity.
+- Publication-blocking live certification against pinned Trino 483 for every
+  supported release tag.
 - Packaged HTTP, native Flight SQL, ADBC, and Arrow Flight SQL JDBC release
   profiles with explicit connectivity support boundaries.
 - Liveness/readiness endpoints and environment-backed clustered deployment

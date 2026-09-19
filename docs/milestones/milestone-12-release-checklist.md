@@ -40,6 +40,9 @@ complete from workflow code alone.
       narrowly scoped publication token and repository variable.
 - [ ] 7. Run local release dry runs: Rust/JDBC/docs tests, archives, formula,
       workflow and script validation, SBOMs, reproducibility, and secret scan.
+- [ ] 8. Run the complete GitHub CI workflow on `main` by manual dispatch;
+      every supported `v...` release tag additionally runs mandatory live
+      certification against pinned Trino 483 before publication.
 - [ ] 8. Run the complete GitHub CI workflow on `main` by manual dispatch.
 - [x] 9. Create and push the signed `v0.1.0-rc.1` tag from a verified `main`
       commit.

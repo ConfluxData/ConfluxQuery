@@ -311,6 +311,160 @@ jobs:
       - run: cargo test --release -p qcli-core million_rows_stream_in_bounded_batches_to_csv_and_jsonl --locked -- --ignored
       - run: cargo test -p qcli-http -p qcli-flight-sql -p qcli-service --locked
 
+  trino-live-certification:
+    name: Trino 483 live certification
+    needs: [validate, build, jdbc]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: qcli-x86_64-unknown-linux-gnu
+          path: dist
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: conformance/m19/python/requirements.txt
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.6"
+          cache-dependency-path: conformance/m19/go/go.sum
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: |
+            jdbc/pom.xml
+            conformance/m19/java/pom.xml
+            conformance/m25/java/pom.xml
+      - name: Start pinned Trino
+        run: docker run --detach --name qcli-trino --publish 8080:8080 trinodb/trino:483
+      - name: Wait for Trino
+        shell: bash
+        run: |
+          for attempt in {1..90}; do
+            if curl --silent --fail http://127.0.0.1:8080/v1/info >/dev/null; then
+              curl --silent --fail \
+                --header 'X-Trino-User: qcli-release' \
+                --data 'SELECT 1' \
+                http://127.0.0.1:8080/v1/statement >/dev/null
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs qcli-trino
+          exit 1
+      - name: Materialize credential-free Trino configuration
+        shell: bash
+        run: |
+          cp examples/milestone-4.env /tmp/qcli-release-trino.env
+          sed 's/targets = \["demo"\]/targets = ["trino-local"]/' \
+            examples/milestone-11-auth.toml > /tmp/qcli-release-auth.toml
+          chmod 600 /tmp/qcli-release-trino.env /tmp/qcli-release-auth.toml
+      - name: Extract packaged qcli
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          tar -xzf "dist/qcli-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" -C /tmp
+          echo "/tmp/qcli-${VERSION}-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"
+      - name: Direct CLI and metadata profile
+        shell: bash
+        run: |
+          qcli --config /tmp/qcli-release-trino.env --target trino-local \
+            --command 'SELECT 1 AS qcli_release_value'
+          qcli --config /tmp/qcli-release-trino.env --target trino-local \
+            --command 'SHOW CATALOGS'
+          qcli --config /tmp/qcli-release-trino.env --target trino-local \
+            --command 'SELECT nationkey, name FROM tpch.tiny.nation ORDER BY nationkey LIMIT 5'
+      - name: Trino driver streaming and cancellation profile
+        env:
+          QCLI_TRINO_URL: http://127.0.0.1:8080
+        run: cargo test --locked -p qcli-driver-trino live_trino_ -- --ignored
+      - name: Install client dependencies
+        run: |
+          pip install -r conformance/m19/python/requirements.txt
+          mvn -B -f jdbc/pom.xml versions:set -DnewVersion=${{ needs.validate.outputs.version }} -DgenerateBackupPoms=false
+          mvn -B -f jdbc/pom.xml install
+      - name: Start packaged Gateway against Trino
+        shell: bash
+        run: |
+          qcli --config /tmp/qcli-release-trino.env serve \
+            --bind 127.0.0.1:18089 \
+            --auth-file /tmp/qcli-release-auth.toml \
+            --flight-bind 127.0.0.1:32010 \
+            >/tmp/qcli-release-trino-gateway.log 2>&1 &
+          echo "$!" > /tmp/qcli-release-trino-gateway.pid
+          for attempt in {1..60}; do
+            if curl --silent --fail http://127.0.0.1:18089/health/ready >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/qcli-release-trino-gateway.log
+          exit 1
+      - name: HTTP API against Trino
+        run: python conformance/m24/http_profile.py
+        env:
+          QCLI_HTTP_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_HTTP_TARGET: trino-local
+          QCLI_HTTP_QUERY: SELECT 1 AS qcli_release_value
+          QCLI_HTTP_EXPECTED_ROWS: "1"
+      - name: Python ADBC against Trino
+        run: python conformance/m19/python/profile.py
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: trino-local
+          QCLI_FLIGHT_QUERY: SELECT 1 AS qcli_release_value
+          QCLI_FLIGHT_EXPECTED_ROWS: "1"
+          QCLI_FLIGHT_TEST_PREPARED: "false"
+      - name: Go ADBC against Trino
+        working-directory: conformance/m19/go
+        run: go run .
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: trino-local
+          QCLI_FLIGHT_QUERY: SELECT 1 AS qcli_release_value
+          QCLI_FLIGHT_EXPECTED_ROWS: "1"
+          QCLI_FLIGHT_TEST_PREPARED: "false"
+      - name: Java ADBC against Trino
+        run: mvn -q -f conformance/m19/java/pom.xml compile exec:java -Dexec.mainClass=org.apache.qcli.AdbcProfile
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: trino-local
+          QCLI_FLIGHT_QUERY: SELECT 1 AS qcli_release_value
+          QCLI_FLIGHT_EXPECTED_ROWS: "1"
+          MAVEN_OPTS: --add-opens=java.base/java.nio=ALL-UNNAMED
+      - name: ConfluxQuery JDBC against Trino
+        run: mvn -B -q -f conformance/m25/java/pom.xml -Dconfluxquery.jdbc.version=${{ needs.validate.outputs.version }} compile exec:java -Dexec.mainClass=in.confluxdata.query.jdbc.ConformanceProfile
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: trino-local
+          QCLI_FLIGHT_QUERY: SELECT 1 AS qcli_release_value
+          QCLI_FLIGHT_EXPECTED_ROWS: "1"
+          QCLI_JDBC_EXTENDED: "false"
+          MAVEN_OPTS: --add-opens=java.base/java.nio=ALL-UNNAMED
+      - name: Rust ADBC against Trino
+        run: cargo run --locked --manifest-path conformance/m19/rust/Cargo.toml
+        env:
+          QCLI_FLIGHT_TOKEN: qcli_k1_demo-key_694251ef9e5a41a3a3318ae40d7549ea04f86624d9e64b02a3f474bfa0282916
+          QCLI_FLIGHT_TARGET: trino-local
+          QCLI_FLIGHT_QUERY: SELECT 1 AS qcli_release_value
+          QCLI_FLIGHT_EXPECTED_ROWS: "1"
+          QCLI_FLIGHT_TEST_PREPARED: "false"
+      - name: Collect service logs
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f /tmp/qcli-release-trino-gateway.pid ]]; then
+            kill "$(cat /tmp/qcli-release-trino-gateway.pid)" || true
+          fi
+          cat /tmp/qcli-release-trino-gateway.log 2>/dev/null || true
+          docker logs qcli-trino 2>&1 || true
+
   container:
     name: Build OCI server image
     needs: validate
@@ -349,7 +503,7 @@ jobs:
 
   publish-github:
     name: Sign and publish GitHub release
-    needs: [validate, build, jdbc, container, connectivity-conformance, release-gates]
+    needs: [validate, build, jdbc, container, connectivity-conformance, release-gates, trino-live-certification]
     runs-on: ubuntu-latest
     environment: github-release
     permissions:
